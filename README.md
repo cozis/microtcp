@@ -30,8 +30,8 @@ int main(void)
 
         char buffer[1024];
         size_t num = microtcp_recv(client, buffer, sizeof(buffer), NULL);
-        microtcp_send(client, "echo: ", 6, &errcode);
-        microtcp_send(client, buffer, num, &errcode);
+        microtcp_send(client, "echo: ", 6, NULL);
+        microtcp_send(client, buffer, num, NULL);
 
         microtcp_close(client);
     }
