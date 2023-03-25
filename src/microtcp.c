@@ -4,11 +4,15 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <netinet/in.h>
-
+#include <arpa/inet.h> // inet_pton
 #include "ip.h"
 #include "arp.h"
 #include "tcp.h"
 #include <microtcp.h>
+
+#ifdef MICROTCP_USING_TAP
+#include <tuntap.h>
+#endif
 
 #ifdef MICROTCP_BACKGROUND_THREAD
 #include <pthread.h>
@@ -22,23 +26,8 @@
 #endif
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-#define LOCK_WHEN_THREADED(mtcp) do {                          \
-        fprintf(stderr, "--- %s before lock\n", __func__);       \
-        fflush(stderr);                                        \
-        pthread_mutex_lock(&(mtcp)->lock);                     \
-        fprintf(stderr, "--- %s after lock\n", __func__); \
-        fflush(stderr);                                        \
-    } while (0);
-
-#define UNLOCK_WHEN_THREADED(mtcp) do {                          \
-        fprintf(stderr, "--- %s before unlock\n", __func__);       \
-        fflush(stderr);                                          \
-        pthread_mutex_unlock(&(mtcp)->lock);                     \
-        fprintf(stderr, "--- %s after unlock\n", __func__); \
-        fflush(stderr);                                          \
-    } while (0);
-
-//#define UNLOCK_WHEN_THREADED(mtcp) do { pthread_mutex_unlock(&(mtcp)->lock); } while (0);
+#define   LOCK_WHEN_THREADED(mtcp) do { pthread_mutex_lock(&(mtcp)->lock);   } while (0);
+#define UNLOCK_WHEN_THREADED(mtcp) do { pthread_mutex_unlock(&(mtcp)->lock); } while (0);
 #else
 #define   LOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
 #define UNLOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
@@ -68,7 +57,13 @@ struct microtcp_socket_t {
         tcp_connection_t *connection;
     };
 #ifdef MICROTCP_BACKGROUND_THREAD
-    pthread_cond_t something_to_accept;
+    union {
+        pthread_cond_t something_to_accept;
+        struct {
+            pthread_cond_t something_to_recv;
+            pthread_cond_t something_to_send;
+        };
+    };
 #endif
 };
 
@@ -110,7 +105,6 @@ const char *microtcp_strerror(microtcp_errcode_t errcode)
         case MICROTCP_ERRCODE_BADCONDVAR: return "Condition variable error";
         case MICROTCP_ERRCODE_NOTLISTENER: return "Invalid operation on a non-listener socket";
         case MICROTCP_ERRCODE_CANTBLOCK: return "Can't execute a blocking call for this function";
-        case MICROTCP_ERRCODE_NOTHINGTOACCEPT: return "Accept queue is empty";
         case MICROTCP_ERRCODE_NOTCONNECTION: return "Invalid operation on a non-connection socket";
     }
     return "???";
@@ -353,7 +347,7 @@ process_packet(microtcp_t *mtcp, const void *packet, size_t len)
 
         default:
         // Unsupported ethertype
-        MICROTCP_DEBUG_LOG("Ignoring packet with ethertype %4x", frame->proto);
+        //MICROTCP_DEBUG_LOG("Ignoring packet with ethertype %4x", frame->proto);
         break;
     }
 }
@@ -390,7 +384,6 @@ void microtcp_step(microtcp_t *mtcp)
             mtcp->last_update_time = current_time;
         }
     }
-unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
 }
 
@@ -404,19 +397,107 @@ static void *loop(void *data)
 }
 #endif
 
-microtcp_t *microtcp_create_using_callbacks(microtcp_ip_t ip, microtcp_mac_t mac,
+static bool is_hex_digit(char c)
+{
+    return (c >= '0' && c <= '9')
+        || (c >= 'a' && c <= 'f')
+        || (c >= 'A' && c <= 'F');
+}
+
+static int int_from_hex_digit(char c)
+{
+    assert(is_hex_digit(c));
+    if (c >= 'A' || c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' || c <= 'f')
+        return c - 'a' + 10;
+    return c - '0';
+}
+
+static bool parse_mac(const char *src, size_t len, 
+                      mac_address_t *mac)
+{
+    if (src == NULL || len != 17
+     || !is_hex_digit(src[0]) 
+     || !is_hex_digit(src[1])
+     || src[2] != ':'
+     || !is_hex_digit(src[3])
+     || !is_hex_digit(src[4])
+     || src[5] != ':'
+     || !is_hex_digit(src[6])
+     || !is_hex_digit(src[7])
+     || src[8] != ':'
+     || !is_hex_digit(src[9])
+     || !is_hex_digit(src[10])
+     || src[11] != ':'
+     || !is_hex_digit(src[12])
+     || !is_hex_digit(src[13])
+     || src[14] != ':'
+     || !is_hex_digit(src[15])
+     || !is_hex_digit(src[16]))
+        return false;
+
+    static const char max_char_map[] = "0123456789ABCDEF";
+
+    if (mac) {
+        mac->data[0] = max_char_map[int_from_hex_digit(src[ 0])] << 4
+                     | max_char_map[int_from_hex_digit(src[ 1])];
+        mac->data[1] = max_char_map[int_from_hex_digit(src[ 3])] << 4
+                     | max_char_map[int_from_hex_digit(src[ 4])];
+        mac->data[2] = max_char_map[int_from_hex_digit(src[ 6])] << 4
+                     | max_char_map[int_from_hex_digit(src[ 7])];
+        mac->data[3] = max_char_map[int_from_hex_digit(src[ 9])] << 4
+                     | max_char_map[int_from_hex_digit(src[10])];
+        mac->data[4] = max_char_map[int_from_hex_digit(src[12])] << 4
+                     | max_char_map[int_from_hex_digit(src[13])];
+        mac->data[5] = max_char_map[int_from_hex_digit(src[15])] << 4
+                     | max_char_map[int_from_hex_digit(src[16])];
+    }
+    return true;
+}
+
+static mac_address_t generate_random_mac()
+{
+    mac_address_t mac = {
+        .data = {
+            rand() & 0xff,
+            rand() & 0xff,
+            rand() & 0xff,
+            rand() & 0xff,
+            rand() & 0xff,
+            rand() & 0xff,
+        },
+    };
+    return mac;
+}
+
+static bool parse_ip(const char *ip, ip_address_t *parsed_ip)
+{
+    return inet_pton(AF_INET, ip, parsed_ip) == 1;
+}
+
+microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
                                             microtcp_callbacks_t callbacks)
 {
+    mac_address_t parsed_mac;
+    if (mac == NULL) {
+        // Generate a random MAC
+        parsed_mac = generate_random_mac();
+    } else {
+        if (!parse_mac(mac, mac ? strlen(mac) : 0, &parsed_mac))
+            return NULL;
+    }
+
+    ip_address_t parsed_ip;
+    if (!parse_ip(ip, &parsed_ip))
+        return NULL;
+
     microtcp_t *mtcp = malloc(sizeof(microtcp_t));
     if (mtcp == NULL)
         return NULL;
 
-    mac_address_t mac2;
-    static_assert(sizeof(mac2) == sizeof(mac));
-    memcpy(&mac2, &mac, sizeof(mac));
-
-    mtcp->ip = ip;
-    mtcp->mac = mac2;
+    mtcp->ip = parsed_ip;
+    mtcp->mac = parsed_mac;
     mtcp->callbacks = callbacks;
     mtcp->last_update_time = time(NULL);
 
@@ -443,15 +524,15 @@ microtcp_t *microtcp_create_using_callbacks(microtcp_ip_t ip, microtcp_mac_t mac
     mtcp->socket_pool[MICROTCP_MAX_SOCKETS-1].prev = NULL;
     mtcp->socket_pool[MICROTCP_MAX_SOCKETS-1].next = NULL;
 
-    ip_init(&mtcp->ip_state, ip, mtcp, send_ip_packet);
+    ip_init(&mtcp->ip_state, parsed_ip, mtcp, send_ip_packet);
     if (!ip_plug_protocol(&mtcp->ip_state, IP_PROTOCOL_TCP, &mtcp->tcp_state, tcp_process_segment_wrapper)) {
         free(mtcp);
         return NULL;
     }
 
-    arp_init(&mtcp->arp_state, ip, mac2, mtcp, send_arp_packet);
+    arp_init(&mtcp->arp_state, parsed_ip, parsed_mac, mtcp, send_arp_packet);
     
-    tcp_init(&mtcp->tcp_state, (tcp_callbacks_t) {
+    tcp_init(&mtcp->tcp_state, parsed_ip, (tcp_callbacks_t) {
         .data = mtcp,
         .send = send_tcp_segment,
     });
@@ -496,6 +577,51 @@ microtcp_t *microtcp_create_using_callbacks(microtcp_ip_t ip, microtcp_mac_t mac
     return mtcp;
 }
 
+
+#ifdef MICROTCP_USING_TAP
+
+bool microtcp_callbacks_create_for_tap(const char *ip, const char *mac,
+                                       microtcp_callbacks_t *callbacks)
+{
+    assert(ip);
+
+    struct device *dev = tuntap_init();
+    if (!dev)
+        return false;
+
+    int netmask = 24; // TODO: Make this configurable
+
+    if (tuntap_start(dev, TUNTAP_MODE_ETHERNET, TUNTAP_ID_ANY) ||
+        tuntap_set_ip(dev, ip, netmask) ||
+        tuntap_set_hwaddr(dev, mac ? mac : "random") ||
+        tuntap_up(dev)) {
+        tuntap_release(dev);
+        return false;
+    }
+
+    *callbacks = (microtcp_callbacks_t) {
+        .data = dev,
+        .free = tuntap_release,
+        .recv = tuntap_read,
+        .send = tuntap_write,
+    };
+    
+    return true;
+}
+
+microtcp_t *microtcp_create(const char *tap_ip, const char *stack_ip, 
+                            const char *tap_mac, const char *stack_mac)
+{
+    microtcp_callbacks_t callbacks;
+    if (!microtcp_callbacks_create_for_tap(tap_ip, tap_mac, &callbacks))
+        return NULL;
+    microtcp_t *mtcp = microtcp_create_using_callbacks(stack_ip, stack_mac, callbacks);
+    if (!mtcp)
+        callbacks.free(callbacks.data);
+    return mtcp;
+}
+#endif
+
 void microtcp_destroy(microtcp_t *mtcp)
 {
 #ifdef MICROTCP_BACKGROUND_THREAD
@@ -520,12 +646,6 @@ pop_socket_struct_from_free_list(microtcp_t *mtcp)
     microtcp_socket_t *socket = mtcp->free_socket_list;
     mtcp->free_socket_list = socket->next;
     return socket;
-}
-
-static bool 
-have_unused_socket_structs(microtcp_t *mtcp)
-{
-    return mtcp->free_socket_list != NULL;
 }
 
 static void
@@ -647,6 +767,26 @@ void microtcp_close(microtcp_socket_t *socket)
     UNLOCK_WHEN_THREADED(mtcp);
 }
 
+static void ready_to_recv(void *data)
+{
+#ifdef MICROTCP_BACKGROUND_THREAD
+    microtcp_socket_t *socket = data;
+    pthread_cond_signal(&socket->something_to_recv);
+#else
+    (void) data;
+#endif
+}
+
+static void ready_to_send(void *data)
+{
+#ifdef MICROTCP_BACKGROUND_THREAD
+    microtcp_socket_t *socket = data;
+    pthread_cond_signal(&socket->something_to_send);
+#else
+    (void) data;
+#endif
+}
+
 microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket, 
                                    bool no_block,
                                    microtcp_errcode_t *errcode)
@@ -662,46 +802,47 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
             goto unlock_and_exit; // Can't accept from a non-listening socket
         }
 
-        if (!have_unused_socket_structs(mtcp)) {
+        socket2 = pop_socket_struct_from_free_list(mtcp);
+        if (!socket2) {
             errcode2 = MICROTCP_ERRCODE_SOCKETLIMIT;
             goto unlock_and_exit; // Socket limit reached
         }
 
-        tcp_connection_t *connection = tcp_listener_accept(socket->listener);
-
-        if (!connection) {
+        tcp_connection_t *connection = tcp_listener_accept(socket->listener, socket2, ready_to_recv, ready_to_send);
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-
-            if (no_block) {
-                errcode2 = MICROTCP_ERRCODE_NOTHINGTOACCEPT;
-                goto unlock_and_exit;
-            }
-
-            do {
-                pthread_cond_wait(&socket->something_to_accept, &mtcp->lock);
-                connection = tcp_listener_accept(socket->listener);
-            } while (!connection);
-
-#else
-
-            if (!no_block)
-                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-            else
-                errcode2 = MICROTCP_ERRCODE_NOTHINGTOACCEPT;
-            goto unlock_and_exit;
-
-#endif
+        while (!connection && !no_block) {
+            pthread_cond_wait(&socket->something_to_accept, &mtcp->lock);
+            connection = tcp_listener_accept(socket->listener, socket2, ready_to_recv, ready_to_send);
         }
-
-        socket2 = pop_socket_struct_from_free_list(mtcp);
-        assert(socket2); // Because we checked at the start
+#else
+        if (!connection && !no_block) {
+            push_unlinked_socket_into_free_list(mtcp, socket2);
+            errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
+            goto unlock_and_exit;
+        }
+#endif
 
         socket2->mtcp = mtcp;
         socket2->prev = NULL;
         socket2->next = NULL;
         socket2->type = SOCKET_CONNECTION;
         socket2->connection = connection;
+
+#ifdef MICROTCP_BACKGROUND_THREAD
+        if (pthread_cond_init(&socket2->something_to_recv, NULL)) {
+            errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
+            push_unlinked_socket_into_free_list(mtcp, socket2);
+            tcp_connection_destroy(connection);
+            goto unlock_and_exit;
+        }
+        if (pthread_cond_init(&socket2->something_to_send, NULL)) {
+            errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
+            push_unlinked_socket_into_free_list(mtcp, socket2);
+            tcp_connection_destroy(connection);
+            goto unlock_and_exit;
+        }
+#endif
 
         push_unlinked_socket_into_used_list(socket2);
     }
@@ -717,6 +858,7 @@ unlock_and_exit:
 
 size_t microtcp_recv(microtcp_socket_t *socket, 
                      void *dst, size_t len,
+                     bool no_block,
                      microtcp_errcode_t *errcode)
 {
     if (!socket || socket->type != SOCKET_CONNECTION) {
@@ -725,19 +867,37 @@ size_t microtcp_recv(microtcp_socket_t *socket,
         return 0;
     }
 
+    size_t num;
     microtcp_t *mtcp = socket->mtcp;
+    microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
 
     LOCK_WHEN_THREADED(mtcp);
-    size_t num = tcp_connection_recv(socket->connection, dst, len);
+    {
+        num = tcp_connection_recv(socket->connection, dst, len);
+
+#ifdef MICROTCP_BACKGROUND_THREAD
+        while (num == 0 && !no_block) {
+            pthread_cond_wait(&socket->something_to_recv, &mtcp->lock);
+            num = tcp_connection_recv(socket->connection, dst, len);
+        }
+#else
+        if (num == 0 && !no_block) {
+            errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
+            goto unlock_and_exit;
+        }
+#endif
+    }
+unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
 
     if (errcode)
-        *errcode = MICROTCP_ERRCODE_NONE;
+        *errcode = errcode2;
     return num;
 }
 
 size_t microtcp_send(microtcp_socket_t *socket, 
                      const void *src, size_t len, 
+                     bool no_block,
                      microtcp_errcode_t *errcode)
 {
     if (!socket || socket->type != SOCKET_CONNECTION) {
@@ -746,13 +906,33 @@ size_t microtcp_send(microtcp_socket_t *socket,
         return 0;
     }
 
+
+    size_t num;
     microtcp_t *mtcp = socket->mtcp;
+    microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
 
     LOCK_WHEN_THREADED(mtcp);
-    size_t num = tcp_connection_send(socket->connection, src, len);
+    {
+        num = tcp_connection_send(socket->connection, src, len);
+
+#ifdef MICROTCP_BACKGROUND_THREAD
+        while (num == 0 && !no_block) {
+            pthread_cond_wait(&socket->something_to_send, &mtcp->lock);
+            num = tcp_connection_send(socket->connection, src, len);
+        }
+#else
+        if (num == 0 && !no_block) {
+            errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
+            goto unlock_and_exit;
+        }
+#endif
+
+    }
+
+unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
 
     if (errcode)
-        *errcode = MICROTCP_ERRCODE_NONE;
+        *errcode = errcode2;
     return num;
 }

@@ -1,3 +1,4 @@
+/*
 #ifdef MICROTCP_LINUX
 
 #include <poll.h>
@@ -85,7 +86,7 @@ static void free_callback(void *data)
     close(tap_fd);
 }
 
-/*
+
 static bool get_ip_address(const char *dev, microtcp_ip_t *ip)
 {
     int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -104,7 +105,7 @@ static bool get_ip_address(const char *dev, microtcp_ip_t *ip)
     close(fd);
     return true;
 }
-*/
+
 
 static bool get_mac_address(const char *dev, microtcp_mac_t *mac)
 {

@@ -1,5 +1,6 @@
 *.pcapng
 loop
+loop2
 test_arp
 test_arp_cov
 report_arp_cov

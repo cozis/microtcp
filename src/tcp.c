@@ -1,4 +1,5 @@
 #include <string.h>
+#include <stdbool.h>
 #include <arpa/inet.h>
 #include "tcp.h"
 
@@ -15,8 +16,9 @@ static int tcp_send(tcp_state_t *tcp_state, ip_address_t ip,
     return tcp_state->callbacks.send(tcp_state->callbacks.data, ip, src, len);
 }
 
-void tcp_init(tcp_state_t *tcp_state, tcp_callbacks_t callbacks)
+void tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks)
 {
+    tcp_state->ip = ip;
     tcp_state->callbacks = callbacks;
 
     for (size_t i = 0; i < TCP_MAX_SOCKETS-1; i++)
@@ -53,30 +55,47 @@ connection_create_waiting_for_ack(tcp_listener_t *listener,
     tcp_state_t *state = listener->state;
 
     // Pop a connection structure from the free list
-    if (state->free_connection_list == NULL)
-        // ERROR: Reached connection limit
-        return NULL;
-    tcp_connection_t *connection = state->free_connection_list;
-    state->free_connection_list = connection->next;
+    tcp_connection_t *connection;
+    {
+        if (state->free_connection_list == NULL)
+            // ERROR: Reached connection limit
+            return NULL;
+        connection = state->free_connection_list;
+        state->free_connection_list = connection->next;
+    }
 
     // Initialize connection structure
-    connection->listener = listener;
-    connection->seq_no = seq_no;
-    connection->ack_no = ack_no;
-    connection->peer_port = peer_port;
-    connection->peer_ip   = peer_ip;
-    connection->in_used = 0;
-    connection->out_used = 0;
-    connection->prev = NULL;
-    connection->next = NULL;
+    {
+        connection->listener = listener;
+        
+        connection->callback_data = NULL;
+        connection->callback_ready_to_recv = NULL;
+        connection->callback_ready_to_send = NULL;
 
+        connection->peer_port = peer_port;
+        connection->peer_ip   = peer_ip;
+
+        connection->rcv_unread = ack_no;
+        connection->rcv_nxt = ack_no;
+        connection->rcv_wnd = TCP_INPUT_BUFFER_SIZE;
+
+        connection->snd_una = seq_no;
+        connection->snd_wnd = 0;
+        connection->snd_nxt = 0;
+
+        connection->prev = NULL;
+        connection->next = NULL;
+    }
 
     // Append the connection to the list of connections
     // waiting for the ACK message
-    if (listener->connections_waiting_for_ack)
-        listener->connections_waiting_for_ack->prev = connection;
-    connection->next = listener->connections_waiting_for_ack;
-    listener->connections_waiting_for_ack = connection;
+    {
+        if (listener->connections_waiting_for_ack)
+            listener->connections_waiting_for_ack->prev = connection;
+        connection->prev = NULL;
+        connection->next = listener->connections_waiting_for_ack;
+        listener->connections_waiting_for_ack = connection;
+    }
 
     return connection;
 }
@@ -84,11 +103,8 @@ connection_create_waiting_for_ack(tcp_listener_t *listener,
 static tcp_listener_t*
 find_listener_with_port(tcp_state_t *state, uint16_t port)
 {
-    TCP_DEBUG_LOG("Looking for listener with port %d", port);
-
     tcp_listener_t *cursor = state->used_listener_list;
     while (cursor) {
-        TCP_DEBUG_LOG("port=%d, seeking=%d", cursor->port, port);
         if (cursor->port == port)
             return cursor;
         cursor = cursor->next;
@@ -121,29 +137,180 @@ static connection_state_t find_connection_associated_to(tcp_listener_t *listener
 {
     tcp_connection_t *connection2 = find_connection(listener->connections, peer_ip, peer_port);
     if (connection2) {
-        *connection = connection2;
+        if (connection)
+            *connection = connection2;
         return SOCKET_IDLE;
     }
 
     connection2 = find_connection(listener->connections_waiting_for_accept_head, peer_ip, peer_port);
     if (connection2) {
-        *connection = connection2;
+        if (connection)
+            *connection = connection2;
         return SOCKET_IDLE;
     }
 
     connection2 = find_connection(listener->connections_waiting_for_ack, peer_ip, peer_port);
     if (connection2) {
-        *connection = connection2;
+        if (connection)
+            *connection = connection2;
         return SOCKET_WAIT;
     }
 
-    *connection = NULL;
+    if (connection)
+        *connection = NULL;
     return SOCKET_NONE;
 }
 
-static uint32_t choose_ack()
+static uint32_t choose_sequence_no()
 {
     return 0;
+}
+
+typedef struct {
+    ip_address_t src_addr;
+    ip_address_t dst_addr;
+    uint8_t  reserved;
+    uint8_t  protocol;
+    uint16_t tcp_length;
+} tcp_pseudoheader_t;
+
+static uint16_t 
+calculate_checksum_tcp(const void *a, const void *b, 
+                       size_t a_len, size_t b_len)
+{
+    assert((a_len & 1) == 0
+        && (b_len & 1) == 0);
+
+    const uint16_t *a2 = a;
+    const uint16_t *b2 = b;
+
+    uint32_t sum = 0xffff;
+    for (size_t i = 0; i < a_len/2; i++) {
+        sum += ntohs(a2[i]);
+        if (sum > 0xffff)
+            sum -= 0xffff;
+    }
+    for (size_t i = 0; i < b_len/2; i++) {
+        sum += ntohs(b2[i]);
+        if (sum > 0xffff)
+            sum -= 0xffff;
+    }
+
+    return htons(~sum);
+}
+
+static void 
+move_connection_from_wait_for_ack_to_wait_for_accept(tcp_connection_t *connection)
+{
+    tcp_listener_t *listener = connection->listener;
+    
+    // Unlink it from the current list
+    if (connection->prev)
+        connection->prev->next = connection->next;
+    else
+        listener->connections_waiting_for_ack = connection->next;
+
+    if (connection->next)
+        connection->next->prev = connection->prev;
+
+
+    // Push it to the new one
+    connection->prev = NULL;
+    connection->next = listener->connections_waiting_for_accept_head;
+
+    if (listener->connections_waiting_for_accept_head)
+        // Accept queue isn't empty
+        listener->connections_waiting_for_accept_head->prev = connection;
+    else
+        // Accept queue is empty
+        listener->connections_waiting_for_accept_tail = connection;
+    listener->connections_waiting_for_accept_head = connection;
+
+
+    if (listener->callback_ready_to_accept)
+        listener->callback_ready_to_accept(listener->callback_data);
+}
+
+static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_t payload)
+{
+    tcp_listener_t *listener = connection->listener;
+    tcp_state_t    *state    = listener->state;
+
+    size_t payload_being_sent = MIN(payload, connection->snd_wnd);
+    size_t total_segment_size = sizeof(tcp_segment_t) + payload_being_sent;
+
+    uint8_t   flags = 0;
+    uint32_t ack_no = 0;
+    if (ack) {
+        flags |= TCP_FLAG_ACK;
+        ack_no = connection->rcv_nxt;
+    }
+    if (syn)
+        flags |= TCP_FLAG_SYN;
+
+    uint32_t seq_no = connection->snd_una;
+    //if (payload_being_sent > 0)
+    //    seq_no++;
+
+    connection->out_header = (tcp_segment_t) {
+        .src_port = htons(listener->port),
+        .dst_port = htons(connection->peer_port),
+        .flags    = flags,
+        .seq_no   = htonl(seq_no),
+        .ack_no   = htonl(ack_no),
+        .offset   = 5, // No options
+        .unused   = 0,
+        .window   = htons(connection->rcv_wnd),
+        .checksum = 0, // Will be calculated later
+        .urgent_pointer = 0,
+    };
+
+    tcp_pseudoheader_t pseudo_header = {
+        .src_addr = state->ip,
+        .dst_addr = connection->peer_ip,
+        .reserved = 0,
+        .protocol = 6, // TCP
+        .tcp_length = htons(total_segment_size),
+    };
+
+    connection->out_header.checksum = calculate_checksum_tcp(&pseudo_header, &connection->out_header, sizeof(pseudo_header), total_segment_size);
+
+    int result = tcp_send(state, connection->peer_ip, &connection->out_header, total_segment_size);
+      
+    if (result < 0) {
+        // It wasn't possible to send out bytes. We'll try again later!
+    } else {
+        size_t actually_sent_bytes = (size_t) result;
+
+        if (actually_sent_bytes < sizeof(tcp_segment_t)) {
+            // Not even the TCP header was sent. I hope this
+            // doesn't ever happen!
+            assert(0);
+        } else {
+            size_t actually_sent_payload_bytes = actually_sent_bytes - sizeof(tcp_segment_t);
+            connection->snd_nxt = MAX(connection->snd_nxt, connection->snd_una + actually_sent_payload_bytes);
+        }
+    }
+
+}
+
+static void handle_received_data(tcp_connection_t *connection, 
+                                 const void *data, size_t size)
+{
+    size_t considered = MIN(size, connection->rcv_wnd);
+
+    if (considered > 0) {
+        size_t input_buffer_usage = TCP_INPUT_BUFFER_SIZE - connection->rcv_wnd;
+        memcpy(connection->in_buffer + input_buffer_usage, data, considered);
+        connection->rcv_wnd -= considered;
+        connection->rcv_nxt += considered;
+
+        emit_segment(connection, true, false, SIZE_MAX);
+
+        // Data is ready to be received by the parent application
+        if (connection->callback_ready_to_recv)
+            connection->callback_ready_to_recv(connection->callback_data);
+    }
 }
 
 void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
@@ -171,119 +338,96 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
 
     tcp_connection_t *connection;
     connection_state_t connection_state = find_connection_associated_to(listener, sender, reordered_src_port, &connection);
+    
+    if (segment->flags & TCP_FLAG_SYN) {
 
-    if ((segment->flags & TCP_FLAG_SYN) && !(segment->flags & TCP_FLAG_ACK)) {
+        if (segment->flags & TCP_FLAG_ACK) {
 
-        /* Connection request */
+            // Drop the packet. We only do servers for now!
+            #warning "TODO: Handle TCP second message of three way handshake"
 
-        if (connection_state != SOCKET_NONE) {
-            // Peer wants to connect, but a connection was already created..
-            // What to do?
-            #warning "TODO: Handle case where an existing connection recieved the SYN message"
-            return;
+        } else {
+    
+            /* Connection request */
+
+            if (connection_state != SOCKET_NONE) {
+                // Peer wants to connect, but a connection was already created..
+                // What to do?
+                #warning "TODO: Handle case where an existing connection recieved the SYN message"
+                return;
+            }
+
+            // Temporary
+            uint32_t seq_no = choose_sequence_no();
+            uint32_t ack_no = ntohl(segment->seq_no)+1;
+            
+            tcp_connection_t *connection = connection_create_waiting_for_ack(listener, seq_no, ack_no, sender, reordered_src_port);
+            if (connection == NULL) {
+                // ERROR: Socket limit reached. Drop the connection silently
+                #warning "TODO: Handle connection limit reached (RST?)"
+                return;
+            }
+
+            emit_segment(connection, true, true, 0);
+            connection->snd_una++;
         }
-
-        // Temporary
-        uint32_t seq_no = ntohs(segment->seq_no);
-        uint32_t ack_no = choose_ack();
-
-        tcp_connection_t *connection = connection_create_waiting_for_ack(listener, seq_no, ack_no, sender, reordered_dst_port);
-        if (connection == NULL) {
-            // ERROR: Socket limit reached. Drop the connection silently
-            #warning "TODO: Handle connection limit reached (RST?)"
-            return;
-        }
-
-        tcp_segment_t segment2 = {
-            .src_port = segment->dst_port,
-            .dst_port = segment->src_port,
-            .flags    = TCP_FLAG_SYN | TCP_FLAG_ACK, // No need for fixing endianess, it's just one byte!
-            .seq_no   = htons(ack_no),
-            .ack_no   = htons(seq_no),
-            .offset   = 5,
-            .unused   = 0,
-            .window   = htons(TCP_INPUT_BUFFER_SIZE - connection->in_used),
-            .checksum = 0,
-            .urgent_pointer = 0,
-        };
-
-        #warning "TODO: Calculare checksum"
-
-        tcp_send(state, sender, &segment2, sizeof(segment2));
-
-        #warning "TODO: Handle TCP connection creation"
-
-    } else if ((segment->flags & TCP_FLAG_SYN) && (segment->flags & TCP_FLAG_ACK)) {
-
-        // Drop the packet. We only do servers for now!
-        #warning "TODO: Handle TCP second message of three way handshake"
-        
-    } else if (!(segment->flags & TCP_FLAG_SYN) && (segment->flags & TCP_FLAG_ACK)) {
-
-        if (connection_state != SOCKET_WAIT) {
-            // Either there is no connection or the connection wasn't
-            // waiting for an ACK segment. What to do?
-            #warning "TODO: Handle case where an existing connection recieved the SYN message"
-            return;
-        }
-
-        // Move connection from the waiting-for-ack list 
-        // to the waiting-for-accept queue.
-
-        // Unlink it from the current list
-        {
-            if (connection->prev)
-                connection->prev->next = connection->next;
-            else
-                listener->connections_waiting_for_ack = connection->next;
-
-            if (connection->next)
-                connection->next->prev = connection->prev;
-        }
-
-        // Push it to the new one
-        {
-            connection->prev = NULL;
-            connection->next = listener->connections_waiting_for_accept_head;
-
-            if (listener->connections_waiting_for_accept_head)
-                // Accept queue isn't empty
-                listener->connections_waiting_for_accept_head->prev = connection;
-            else
-                // Accept queue is empty
-                listener->connections_waiting_for_accept_tail = connection;
-            listener->connections_waiting_for_accept_head = connection;
-        }
-
-        if (listener->callback)
-            listener->callback(listener->data);
-
-        // TODO: What about the payload?
-        #warning "TODO: Handle payload of TCP ACK message"
 
     } else {
-        
-        if (connection_state != SOCKET_IDLE) {
-            // Either there is no connection associated to this peer
-            // at this port, or the connection is waiting for an ACK.
-            // What to do?
-            #warning "TODO: Handle case where unexpected TCP data message is received"
-            return;
+
+        if (segment->flags & TCP_FLAG_ACK) {
+
+            if (connection_state == SOCKET_WAIT)
+                move_connection_from_wait_for_ack_to_wait_for_accept(connection);
+            else if (connection_state == SOCKET_IDLE) {
+
+            } else {
+                #warning "TODO: Handle case where no connection exists"
+                assert(connection_state == SOCKET_NONE);
+                return;
+            }
+
+            uint32_t ack_no = ntohl(segment->ack_no);
+
+            if (ack_no <= connection->snd_una)
+                TCP_DEBUG_LOG("Received segment acknowledged again %d", ack_no);
+            else {
+                if (ack_no > connection->snd_nxt) {
+                    TCP_DEBUG_LOG("Received segment acknowledged unsent data with sequence number %d, but %d still wasn't sent", ack_no, connection->snd_nxt);
+                    return; // Acknowledged unsent data
+                }
+            
+                size_t newly_acked_bytes = ack_no - connection->snd_una;
+                memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
+                connection->snd_wnd -= newly_acked_bytes;
+                connection->snd_una = ack_no;
+
+                // Now there's space available in the output buffer
+                if (connection->callback_ready_to_send)
+                    connection->callback_ready_to_send(connection->callback_data);
+            }
+
+        } else {
+
+            if (connection_state != SOCKET_IDLE) {
+                // Either there is no connection associated to this peer
+                // at this port, or the connection is waiting for an ACK.
+                // What to do?
+                #warning "TODO: Handle case where unexpected TCP data message is received"
+                return;
+            }
         }
+        handle_received_data(connection, segment->payload, 
+                             len - sizeof(tcp_segment_t));
 
-        char *payload = segment->payload;
-        size_t payload_arrived    = len - sizeof(tcp_segment_t);
-        size_t payload_capacity   = TCP_INPUT_BUFFER_SIZE - connection->in_used;
-        size_t payload_considered = MIN(payload_arrived, payload_capacity);
-
-        memcpy(connection->in_buffer + connection->in_used, payload, payload_considered);
-        connection->in_used += payload_considered;
-        connection->ack_no += payload_considered; // Is this right?
+        if (segment->flags & TCP_FLAG_FIN) {
+            #warning "TODO: Handle FIN segment"
+        }
     }
 }
 
 tcp_listener_t*
-tcp_listener_create(tcp_state_t *state, uint16_t port, void *data, void (*callback)(void*))
+tcp_listener_create(tcp_state_t *state, uint16_t port, void *callback_data, 
+                    void (*callback_ready_to_accept)(void*))
 {
     if (find_listener_with_port(state, port)) {
         // ERROR: A connection is already listening on this port
@@ -307,8 +451,8 @@ tcp_listener_create(tcp_state_t *state, uint16_t port, void *data, void (*callba
     listener->connections_waiting_for_ack = NULL;
     listener->connections_waiting_for_accept_head = NULL;
     listener->connections_waiting_for_accept_tail = NULL;
-    listener->data = data;
-    listener->callback = callback;
+    listener->callback_data = callback_data;
+    listener->callback_ready_to_accept = callback_ready_to_accept;
 
     // Push listener connection structure to the used list
     listener->prev = NULL;
@@ -346,7 +490,9 @@ void tcp_listener_destroy(tcp_listener_t *listener)
     state->free_listener_list = listener;
 }
 
-tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener)
+tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_data, 
+                                      void (*callback_ready_to_recv)(void*), 
+                                      void (*callback_ready_to_send)(void*))
 {
     (void) listener;
 
@@ -374,6 +520,11 @@ tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener)
             listener->connections->prev = connection;
         listener->connections = connection;
     }
+
+    connection->callback_data = callback_data;
+    connection->callback_ready_to_recv = callback_ready_to_recv;
+    connection->callback_ready_to_send = callback_ready_to_send;
+
     return connection;
 }
 
@@ -399,13 +550,20 @@ void tcp_connection_destroy(tcp_connection_t *connection)
 }
 
 size_t tcp_connection_recv(tcp_connection_t *connection, 
-                       void *dst, size_t len)
+                           void *dst, size_t len)
 {
-    size_t num = MIN(len, connection->in_used);
+    size_t unread = connection->rcv_nxt - connection->rcv_unread;
+    size_t num = MIN(len, unread);
     memcpy(dst, connection->in_buffer, num);
 
-    memmove(connection->in_buffer, connection->in_buffer + num, connection->in_used - num);
-    connection->in_used -= num;
+
+    size_t input_buffer_usage = TCP_INPUT_BUFFER_SIZE - connection->rcv_wnd;
+
+    memmove(connection->in_buffer, connection->in_buffer + num, input_buffer_usage - num);
+    connection->rcv_unread += num;
+    connection->rcv_wnd    += num;
+
+    assert(connection->rcv_wnd <= TCP_INPUT_BUFFER_SIZE);
 
     return num;
 }
@@ -414,55 +572,18 @@ static size_t
 append_to_output_buffer(tcp_connection_t *connection, 
                         const void *src, size_t len)
 {
-    size_t num = MIN(len, TCP_OUTPUT_BUFFER_SIZE - connection->out_used);
+    size_t capacity = TCP_OUTPUT_BUFFER_SIZE - connection->snd_wnd;
+    size_t num = MIN(len, capacity);
 
-    memcpy(connection->out_buffer + connection->out_used, src, num);
-    connection->out_used += len;
+    memcpy(connection->out_buffer + connection->snd_wnd, src, num);
+    connection->snd_wnd += num;
 
     return num;
-}
-
-static uint32_t calculate_checksum(const void *data, size_t size)
-{
-    (void) data,
-    (void) size;
-
-    #warning "TODO: Calculate TCP checksum"
-    return 0;
-}
-
-static void 
-try_flushing_output_buffer(tcp_connection_t *connection)
-{
-    tcp_state_t *tcp_state = connection->listener->state;
-
-    tcp_segment_t *segment = &connection->out_header;
-    segment->src_port = htons(connection->listener->port);
-    segment->dst_port = htons(connection->peer_port);
-    segment->seq_no = htons(connection->seq_no); // Should this be increased by the segment size?
-    segment->ack_no = htons(connection->ack_no);
-    segment->unused = 0;
-    segment->offset = 5; // No options
-    segment->flags  = 0;
-    segment->window = htons(TCP_INPUT_BUFFER_SIZE - connection->in_used);
-    segment->checksum = 0; // Temporary value
-    segment->urgent_pointer = 0; // Don't support urgent data
-
-    segment->checksum = calculate_checksum(segment, sizeof(tcp_segment_t));
-
-    int sent_bytes = tcp_send(tcp_state, connection->peer_ip, segment, sizeof(tcp_segment_t) + connection->out_used);
-            
-    if (sent_bytes < 0) {
-        // It wasn't possible to send out bytes. We'll try again later!
-    } else {
-        memmove(connection->out_buffer, connection->out_buffer + sent_bytes, connection->out_used - sent_bytes);
-        connection->out_used -= sent_bytes;
-    }
 }
 
 size_t tcp_connection_send(tcp_connection_t *connection, const void *src, size_t len)
 {
     size_t num = append_to_output_buffer(connection, src, len);
-    try_flushing_output_buffer(connection);
+    emit_segment(connection, false, false, SIZE_MAX);
     return num;
 }

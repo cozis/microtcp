@@ -16,5 +16,6 @@ static_assert(sizeof(ip_address_t) == 4);
 #define MAC_BROADCAST (mac_address_t) {.data = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
 
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
+#define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
 
 #endif /* MICROTCP_DEFS_H */

@@ -1,18 +1,16 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-#include <endian.h>
 #include "defs.h"
 #include "icmp.h"
 
 #define IP_PLUGGED_PROTOCOLS_MAX 4
 
 typedef struct {
-#if __BYTE_ORDER == __LITTLE_ENDIAN
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     uint8_t  header_length: 4;
     uint8_t  version: 4;
-#endif
-#if __BYTE_ORDER == __BIG_ENDIAN
+#else
     uint8_t  version: 4;
     uint8_t  header_length: 4;
 #endif
