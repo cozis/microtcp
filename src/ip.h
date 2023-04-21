@@ -61,5 +61,6 @@ void ip_change_output_buffer(ip_state_t *state, void *ptr, size_t max);
 void ip_init(ip_state_t *state, ip_address_t ip, void *send_data, void (*send)(void*, ip_address_t, size_t));
 void ip_free(ip_state_t *state);
 int  ip_send(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, bool no_fragm, const void *src, size_t len);
+int  ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, bool no_fragm, const slice_list_t *slices, size_t num_slices);
 void ip_process_packet(ip_state_t *state, const void *packet, size_t len);
 bool ip_plug_protocol(ip_state_t *ip_state, uint8_t protocol, void *data, void (*process_packet)(void *data, ip_address_t sender, const void *packet, size_t len));

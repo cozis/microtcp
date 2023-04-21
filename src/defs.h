@@ -15,6 +15,11 @@ static_assert(sizeof(ip_address_t) == 4);
 #define MAC_ZERO      (mac_address_t) {.data = {0x00, 0x00, 0x00, 0x00, 0x00, 0x00}}
 #define MAC_BROADCAST (mac_address_t) {.data = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
 
+typedef struct {
+    const void *src;
+    size_t len;
+} slice_list_t;
+
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
 

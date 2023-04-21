@@ -120,11 +120,26 @@ void ip_seconds_passed(ip_state_t *state, size_t seconds)
     (void) seconds;
 }
 
-int ip_send(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, bool no_fragm, const void *src, size_t len)
+int ip_send(ip_state_t *state, ip_protocol_t protocol, 
+            ip_address_t dst, bool no_fragm, 
+            const void *src, size_t len)
 {
+    const slice_list_t slices[] = {
+        {src, len}
+    };
+    return ip_send_2(state, protocol, dst, no_fragm, slices, 1);
+}
+
+int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, 
+              bool no_fragm, const slice_list_t *slices, size_t num_slices)
+{
+    size_t total_len = 0;
+    for (size_t i = 0; i < num_slices; i++)
+        total_len += slices[i].len;
+
     size_t managed_payload = 0;
 
-    while (managed_payload < len && (managed_payload == 0 || !no_fragm)) {
+    while (managed_payload < total_len && (managed_payload == 0 || !no_fragm)) {
 
         if (state->output_ptr == NULL) {
             // Lower layers of the network stack didn't specify an output
@@ -144,7 +159,7 @@ int ip_send(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, bool no
             return -1;
 
         size_t current_payload_limit = state->output_max - sizeof(ip_packet_t);
-        size_t remaining_payload = len - managed_payload;
+        size_t remaining_payload = total_len - managed_payload;
         size_t considered_payload = MIN(current_payload_limit, remaining_payload);
 
         ip_packet_t *packet = state->output_ptr; // This changes every iteration
@@ -159,9 +174,15 @@ int ip_send(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, bool no
         packet->checksum = 0; // Temporary value
         packet->src_ip = state->ip;
         packet->dst_ip = dst;
-        memcpy(packet->payload, 
-               src + managed_payload, 
-               considered_payload);
+
+        size_t copied_bytes = 0;
+        size_t copied_slices = 0;
+        while (copied_bytes < considered_payload) {
+            size_t copying = MIN(slices[copied_slices].len, considered_payload - copied_bytes);
+            memcpy(packet->payload + copied_bytes, slices[copied_slices].src, copying);
+            copied_bytes += copying;
+            copied_slices++;
+        }
 
         packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * packet->header_length);
 

@@ -10,12 +10,6 @@
 #define TCP_DEBUG_LOG(...)
 #endif
 
-static int tcp_send(tcp_state_t *tcp_state, ip_address_t ip,
-                     const void *src, size_t len)
-{
-    return tcp_state->callbacks.send(tcp_state->callbacks.data, ip, src, len);
-}
-
 void tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks)
 {
     tcp_state->ip = ip;
@@ -46,6 +40,10 @@ void tcp_seconds_passed(tcp_state_t *state, size_t seconds)
     (void) state;
     (void) seconds;
 }
+
+typedef enum {
+    TCP_CONNECTION_
+} tcp_connection_state;
 
 static tcp_connection_t*
 connection_create_waiting_for_ack(tcp_listener_t *listener, 
@@ -133,7 +131,9 @@ static tcp_connection_t *find_connection(tcp_connection_t *list, ip_address_t pe
     return NULL;
 }
 
-static connection_state_t find_connection_associated_to(tcp_listener_t *listener, ip_address_t peer_ip, uint16_t peer_port, tcp_connection_t **connection)
+static connection_state_t 
+find_connection_associated_to(tcp_listener_t *listener, ip_address_t peer_ip, 
+                              uint16_t peer_port, tcp_connection_t **connection)
 {
     tcp_connection_t *connection2 = find_connection(listener->connections, peer_ip, peer_port);
     if (connection2) {
@@ -175,25 +175,21 @@ typedef struct {
 } tcp_pseudoheader_t;
 
 static uint16_t 
-calculate_checksum_tcp(const void *a, const void *b, 
-                       size_t a_len, size_t b_len)
+calculate_checksum(const slice_list_t *slices, size_t num_slices)
 {
-    assert((a_len & 1) == 0
-        && (b_len & 1) == 0);
-
-    const uint16_t *a2 = a;
-    const uint16_t *b2 = b;
-
     uint32_t sum = 0xffff;
-    for (size_t i = 0; i < a_len/2; i++) {
-        sum += ntohs(a2[i]);
-        if (sum > 0xffff)
-            sum -= 0xffff;
-    }
-    for (size_t i = 0; i < b_len/2; i++) {
-        sum += ntohs(b2[i]);
-        if (sum > 0xffff)
-            sum -= 0xffff;
+
+    for (size_t slice_idx = 0; slice_idx < num_slices; slice_idx++) {
+        
+        assert((slices[slice_idx].len & 1) == 0);
+        const uint16_t *src = slices[slice_idx].src;
+        const size_t    len = slices[slice_idx].len;
+
+        for (size_t i = 0; i < len/2; i++) {
+            sum += ntohs(src[i]);
+            if (sum > 0xffff)
+                sum -= 0xffff;
+        }
     }
 
     return htons(~sum);
@@ -252,7 +248,7 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
     //if (payload_being_sent > 0)
     //    seq_no++;
 
-    connection->out_header = (tcp_segment_t) {
+    tcp_segment_t header = {
         .src_port = htons(listener->port),
         .dst_port = htons(connection->peer_port),
         .flags    = flags,
@@ -273,10 +269,17 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
         .tcp_length = htons(total_segment_size),
     };
 
-    connection->out_header.checksum = calculate_checksum_tcp(&pseudo_header, &connection->out_header, sizeof(pseudo_header), total_segment_size);
+    header.checksum = calculate_checksum((slice_list_t[]) {
+        {&pseudo_header, sizeof(tcp_pseudoheader_t)},
+        {&header, sizeof(tcp_segment_t)},
+        {connection->out_buffer, connection->snd_wnd},
+    }, 3);
 
-    int result = tcp_send(state, connection->peer_ip, &connection->out_header, total_segment_size);
-      
+    int result = state->callbacks.send(state->callbacks.data, connection->peer_ip, (slice_list_t[]) {
+        {&header, sizeof(tcp_segment_t)},
+        {connection->out_buffer, payload_being_sent},
+    }, 2);
+
     if (result < 0) {
         // It wasn't possible to send out bytes. We'll try again later!
     } else {
@@ -449,6 +452,7 @@ tcp_listener_create(tcp_state_t *state, uint16_t port, void *callback_data,
     listener->port = port;
     listener->connections = NULL;
     listener->connections_waiting_for_ack = NULL;
+    listener->connections_waiting_for_fin = NULL;
     listener->connections_waiting_for_accept_head = NULL;
     listener->connections_waiting_for_accept_tail = NULL;
     listener->callback_data = callback_data;
@@ -533,13 +537,18 @@ void tcp_connection_destroy(tcp_connection_t *connection)
     // NOTE: This can only be called when the
     //       connection was accepted.
 
+    // Make sure the connection was first finished
+    // by being moved from the idle list to the
+    // waiting-for-fin list.
+    tcp_connection_finish(connection);
+
     tcp_listener_t *listener = connection->listener;
 
-    // Pop connection from the idle connection list
+    // Pop connection from the waiting-for-fin list
     if (connection->prev)
         connection->prev->next = connection->next;
     else
-        listener->connections = connection->next;
+        listener->connections_waiting_for_fin = connection->next;
 
     // Push it into the free connection list
     tcp_state_t *state = listener->state;
@@ -583,7 +592,49 @@ append_to_output_buffer(tcp_connection_t *connection,
 
 size_t tcp_connection_send(tcp_connection_t *connection, const void *src, size_t len)
 {
-    size_t num = append_to_output_buffer(connection, src, len);
-    emit_segment(connection, false, false, SIZE_MAX);
+    size_t num;
+    if (connection->read_only)
+        num = 0;
+    else {
+        num = append_to_output_buffer(connection, src, len);
+        emit_segment(connection, false, false, SIZE_MAX);
+    }
     return num;
+}
+
+void tcp_connection_finish(tcp_connection_t *connection)
+{
+    if (!connection->read_only) {
+
+        // Move connection from idle list to 
+        // waiting-for-fin list
+
+        tcp_listener_t *listener = connection->listener;
+
+        // Pop it from the idle list
+        {
+            if (connection->prev)
+                connection->prev->next = connection->next;
+            else
+                listener->connections = connection->next;
+
+            if (connection->next)
+                connection->next->prev = connection->prev;
+
+            connection->prev = NULL;
+            connection->next = NULL;
+        }
+
+        #warning "The FIN segment should be sent here"
+
+        // Push it to the waiting-for-fin list
+        {
+            connection->prev = NULL;
+            connection->next = listener->connections_waiting_for_fin;
+            listener->connections_waiting_for_fin = connection;
+        }
+
+        // Now mark the connection as read-only
+        connection->read_only = true;
+    }
 }

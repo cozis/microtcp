@@ -160,11 +160,12 @@ static void send_arp_packet(void *data, mac_address_t dst)
     mtcp->used_buffer->used = 0;
 }
 
-static int send_tcp_segment(void *data, ip_address_t dst, 
-                             const void *str, size_t len)
+static int send_tcp_segment(void *data, ip_address_t ip, 
+                            const slice_list_t *slices, 
+                            size_t num_slices)
 {
     microtcp_t *mtcp = data;
-    return ip_send(&mtcp->ip_state, IP_PROTOCOL_TCP, dst, true, str, len);
+    return ip_send_2(&mtcp->ip_state, IP_PROTOCOL_TCP, ip, true, slices, num_slices);
 }
 
 static void move_wait_buffer_to_free_list(buffer_t *buffer)
