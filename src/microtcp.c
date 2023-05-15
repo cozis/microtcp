@@ -1,13 +1,13 @@
 #include <time.h> // time()
+#include <ctype.h>
 #include <errno.h>
 #include <string.h> // strerror()
 #include <stdint.h>
 #include <stdlib.h>
-#include <netinet/in.h>
-#include <arpa/inet.h> // inet_pton
 #include "ip.h"
 #include "arp.h"
 #include "tcp.h"
+#include "endian.h"
 #include <microtcp.h>
 
 #ifdef MICROTCP_USING_TAP
@@ -15,7 +15,7 @@
 #endif
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-#include <pthread.h>
+#include "tinycthread.h"
 #endif
 
 #ifdef MICROTCP_DEBUG
@@ -26,8 +26,8 @@
 #endif
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-#define   LOCK_WHEN_THREADED(mtcp) do { pthread_mutex_lock(&(mtcp)->lock);   } while (0);
-#define UNLOCK_WHEN_THREADED(mtcp) do { pthread_mutex_unlock(&(mtcp)->lock); } while (0);
+#define   LOCK_WHEN_THREADED(mtcp) do { mtx_lock(&(mtcp)->lock);   } while (0);
+#define UNLOCK_WHEN_THREADED(mtcp) do { mtx_unlock(&(mtcp)->lock); } while (0);
 #else
 #define   LOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
 #define UNLOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
@@ -58,10 +58,10 @@ struct microtcp_socket_t {
     };
 #ifdef MICROTCP_BACKGROUND_THREAD
     union {
-        pthread_cond_t something_to_accept;
+        cnd_t something_to_accept;
         struct {
-            pthread_cond_t something_to_recv;
-            pthread_cond_t something_to_send;
+            cnd_t something_to_recv;
+            cnd_t something_to_send;
         };
     };
 #endif
@@ -73,8 +73,8 @@ struct microtcp_t {
 
 #ifdef MICROTCP_BACKGROUND_THREAD
     bool thread_should_stop;
-    pthread_t thread_id;
-    pthread_mutex_t lock;
+    thrd_t thread_id;
+    mtx_t lock;
 #endif
 
     microtcp_callbacks_t callbacks;
@@ -147,7 +147,7 @@ static void send_arp_packet(void *data, mac_address_t dst)
     ethernet_frame_t *frame = (ethernet_frame_t*) buffer->data;
     frame->dst = dst;
     frame->src = mtcp->mac;
-    frame->proto = htons(ETHERNET_PROTOCOL_ARP);
+    frame->proto = cpu_to_net_u16(ETHERNET_PROTOCOL_ARP);
 
     // TODO: What about the CRC?
     #warning "TODO: Calculate Ethernet CRC"
@@ -317,7 +317,7 @@ static void send_ip_packet(void *data, ip_address_t ip, size_t len)
     ethernet_frame_t *frame = (ethernet_frame_t*) buffer->data;
     frame->src = mtcp->mac;
     frame->dst = MAC_ZERO; // We need to determine it
-    frame->proto = htons(ETHERNET_PROTOCOL_IP);
+    frame->proto = cpu_to_net_u16(ETHERNET_PROTOCOL_IP);
 
     arp_resolve_mac(&mtcp->arp_state, ip, buffer, mac_resolved);
 }
@@ -337,7 +337,7 @@ process_packet(microtcp_t *mtcp, const void *packet, size_t len)
 
     const ethernet_frame_t *frame = packet;
     
-    switch (ntohs(frame->proto)) {
+    switch (net_to_cpu_u16(frame->proto)) {
         case ETHERNET_PROTOCOL_ARP: 
         arp_process_packet(&mtcp->arp_state, frame+1, len - sizeof(ethernet_frame_t)); 
         break;
@@ -362,8 +362,9 @@ void microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len)
 
 void microtcp_step(microtcp_t *mtcp)
 {
-    char packet[UINT16_MAX];
-    
+    char packet[1024]; // This buffer is the bottleneck for the 
+                       // maximum packet size that can be processed.
+
     // The call to [recv] (which is assumed to be blocking)
     // needs to be out of the critical section to give other
     // threads the ability to progress in the mean time.        
@@ -389,12 +390,12 @@ void microtcp_step(microtcp_t *mtcp)
 }
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-static void *loop(void *data)
+static int loop(void *data)
 {
     microtcp_t *mtcp = data;
     while (!mtcp->thread_should_stop)
         microtcp_step(mtcp);
-    return NULL;
+    return 0;
 }
 #endif
 
@@ -474,7 +475,46 @@ static mac_address_t generate_random_mac()
 
 static bool parse_ip(const char *ip, ip_address_t *parsed_ip)
 {
-    return inet_pton(AF_INET, ip, parsed_ip) == 1;
+    size_t len = strlen(ip);
+    size_t i = 0;
+
+    uint32_t value = 0;
+    
+    for (size_t k = 0; k < 4; k++) {
+        if (i == len || !isdigit(ip[i]))
+            return false;
+        int n = 0; // Used to represent a byte, but it's larger
+                   // to detect overflows.
+        do {
+            // Convert character to number
+            int digit = ip[i] - '0';
+            if (n > (UINT8_MAX - digit)/10)
+                // Adding this digit would make the
+                // byte overflow, so it can't be part
+                // of the octet.
+                break;
+            n = n * 10 + digit;
+            i++;
+        } while (i < len && isdigit(ip[i]));
+        
+        assert(n >= 0 && n <= UINT8_MAX);
+        value = (value << 8) | (uint8_t) n;
+        
+        // If this isn't the last octet and there is no
+        // dot following it, the address is invalid.
+        if (k < 3) {
+            if (i == len || ip[i] != '.')
+                return false;
+            i++; // Consume the dot.
+        }
+    }
+    if (i < len)
+        // source string contains something 
+        // other than the address in it.
+        return false;
+
+    *parsed_ip = value;
+    return true;
 }
 
 microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
@@ -542,7 +582,7 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
     {
-        if (pthread_mutex_init(&mtcp->lock, NULL)) {
+        if (mtx_init(&mtcp->lock, mtx_plain) != thrd_success) {
             ip_free(&mtcp->ip_state);
             arp_free(&mtcp->arp_state);
             tcp_free(&mtcp->tcp_state);
@@ -550,10 +590,11 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
             return NULL;
         }
         mtcp->thread_should_stop = false;
-        if (pthread_create(&mtcp->thread_id, NULL, loop, mtcp)) {
+        if (thrd_create(&mtcp->thread_id, loop, mtcp) != thrd_success) {
             ip_free(&mtcp->ip_state);
             arp_free(&mtcp->arp_state);
             tcp_free(&mtcp->tcp_state);
+            mtx_destroy(&mtcp->lock);
             free(mtcp);
             return NULL;
         }
@@ -581,6 +622,28 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
 
 #ifdef MICROTCP_USING_TAP
 
+static void log_callback_for_tuntap_library(int level, const char *errmsg) 
+{
+    const char *name;
+
+    switch(level) {
+        case TUNTAP_LOG_DEBUG : name = "Debug";   break;
+        case TUNTAP_LOG_INFO  : name = "Info";    break;
+        case TUNTAP_LOG_NOTICE: name = "Notice";  break;
+        case TUNTAP_LOG_WARN  : name = "Warning"; break;
+        case TUNTAP_LOG_ERR   : name = "Error";   break;
+        case TUNTAP_LOG_NONE:
+        default:
+            name = NULL;
+            break;
+    }
+    if (name == NULL) {
+        MICROTCP_DEBUG_LOG("%s (from the tap library)", errmsg);
+    } else {
+        MICROTCP_DEBUG_LOG("[%s] %s (from the tap library)", name, errmsg);
+    }
+}
+
 bool microtcp_callbacks_create_for_tap(const char *ip, const char *mac,
                                        microtcp_callbacks_t *callbacks)
 {
@@ -590,15 +653,21 @@ bool microtcp_callbacks_create_for_tap(const char *ip, const char *mac,
     if (!dev)
         return false;
 
+    // This must be set AFTER tuntap_init because
+    // it sets the callback function to the default
+    // callback which writes to stderr.
+    tuntap_log_set_cb(log_callback_for_tuntap_library);
+
     int netmask = 24; // TODO: Make this configurable
 
-    if (tuntap_start(dev, TUNTAP_MODE_ETHERNET, TUNTAP_ID_ANY) ||
-        tuntap_set_ip(dev, ip, netmask) ||
-        tuntap_set_hwaddr(dev, mac ? mac : "random") ||
-        tuntap_up(dev)) {
-        tuntap_release(dev);
-        return false;
-    }
+    if (tuntap_start(dev, TUNTAP_MODE_ETHERNET, TUNTAP_ID_ANY))
+        goto cleanup;
+
+    tuntap_set_ip(dev, ip, netmask);
+    tuntap_set_hwaddr(dev, mac ? mac : "random");
+
+    if (tuntap_up(dev))
+        goto cleanup;
 
     *callbacks = (microtcp_callbacks_t) {
         .data = dev,
@@ -608,6 +677,10 @@ bool microtcp_callbacks_create_for_tap(const char *ip, const char *mac,
     };
     
     return true;
+
+cleanup:
+    tuntap_release(dev);
+    return false;
 }
 
 microtcp_t *microtcp_create(const char *tap_ip, const char *stack_ip, 
@@ -628,8 +701,8 @@ void microtcp_destroy(microtcp_t *mtcp)
 #ifdef MICROTCP_BACKGROUND_THREAD
     MICROTCP_DEBUG_LOG("Stopping thread");
     mtcp->thread_should_stop = true;
-    pthread_join(mtcp->thread_id, NULL);
-    pthread_mutex_destroy(&mtcp->lock);
+    thrd_join(mtcp->thread_id, NULL);
+    mtx_destroy(&mtcp->lock);
     MICROTCP_DEBUG_LOG("Thread stopped");
 #endif
 
@@ -689,7 +762,7 @@ static void ready_to_accept(void *data)
 {
 #ifdef MICROTCP_BACKGROUND_THREAD
     microtcp_socket_t *socket = data;
-    pthread_cond_signal(&socket->something_to_accept);
+    cnd_signal(&socket->something_to_accept);
 #else
     (void) data;
 #endif
@@ -723,7 +796,7 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
         socket->listener = listener;
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-        if (pthread_cond_init(&socket->something_to_accept, NULL)) {
+        if (cnd_init(&socket->something_to_accept) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
             push_unlinked_socket_into_free_list(mtcp, socket);
             tcp_listener_destroy(listener);
@@ -752,7 +825,7 @@ void microtcp_close(microtcp_socket_t *socket)
             
             case SOCKET_LISTENER:
 #ifdef MICROTCP_BACKGROUND_THREAD
-            pthread_cond_destroy(&socket->something_to_accept);
+            cnd_destroy(&socket->something_to_accept);
 #endif
             tcp_listener_destroy(socket->listener);
             break;
@@ -772,7 +845,7 @@ static void ready_to_recv(void *data)
 {
 #ifdef MICROTCP_BACKGROUND_THREAD
     microtcp_socket_t *socket = data;
-    pthread_cond_signal(&socket->something_to_recv);
+    cnd_signal(&socket->something_to_recv);
 #else
     (void) data;
 #endif
@@ -782,7 +855,7 @@ static void ready_to_send(void *data)
 {
 #ifdef MICROTCP_BACKGROUND_THREAD
     microtcp_socket_t *socket = data;
-    pthread_cond_signal(&socket->something_to_send);
+    cnd_signal(&socket->something_to_send);
 #else
     (void) data;
 #endif
@@ -813,7 +886,8 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (!connection && !no_block) {
-            pthread_cond_wait(&socket->something_to_accept, &mtcp->lock);
+            if (cnd_wait(&socket->something_to_accept, &mtcp->lock) != thrd_success)
+                abort();
             connection = tcp_listener_accept(socket->listener, socket2, ready_to_recv, ready_to_send);
         }
 #else
@@ -831,14 +905,15 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
         socket2->connection = connection;
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-        if (pthread_cond_init(&socket2->something_to_recv, NULL)) {
+        if (cnd_init(&socket2->something_to_recv) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
             push_unlinked_socket_into_free_list(mtcp, socket2);
             tcp_connection_destroy(connection);
             goto unlock_and_exit;
         }
-        if (pthread_cond_init(&socket2->something_to_send, NULL)) {
+        if (cnd_init(&socket2->something_to_send) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
+            cnd_destroy(&socket2->something_to_recv);
             push_unlinked_socket_into_free_list(mtcp, socket2);
             tcp_connection_destroy(connection);
             goto unlock_and_exit;
@@ -878,7 +953,8 @@ size_t microtcp_recv(microtcp_socket_t *socket,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (num == 0 && !no_block) {
-            pthread_cond_wait(&socket->something_to_recv, &mtcp->lock);
+            if (cnd_wait(&socket->something_to_recv, &mtcp->lock) != thrd_success)
+                abort();
             num = tcp_connection_recv(socket->connection, dst, len);
         }
 #else
@@ -918,19 +994,15 @@ size_t microtcp_send(microtcp_socket_t *socket,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (num == 0 && !no_block) {
-            pthread_cond_wait(&socket->something_to_send, &mtcp->lock);
+            if (cnd_wait(&socket->something_to_send, &mtcp->lock) != thrd_success)
+                abort();
             num = tcp_connection_send(socket->connection, src, len);
         }
 #else
-        if (num == 0 && !no_block) {
+        if (num == 0 && !no_block)
             errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-            goto unlock_and_exit;
-        }
 #endif
-
     }
-
-unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
 
     if (errcode)

@@ -6,8 +6,10 @@ int main(void)
     microtcp_errcode_t errcode;
 
     microtcp_t *mtcp = microtcp_create("10.0.0.5", "10.0.0.4", NULL, NULL);
-    if (mtcp == NULL)
+    if (mtcp == NULL) {
+        fprintf(stderr, "Error: Failed to instanciate microtcp stack\n");
         return -1;
+    }
     
     uint16_t port = 80;
     microtcp_socket_t *server = microtcp_open(mtcp, port, &errcode);
@@ -36,21 +38,21 @@ int main(void)
             fprintf(stderr, "Error: %s\n", microtcp_strerror(errcode));
             goto handled;
         }
-        fprintf(stderr, "(%ld bytes received)\n", num);
+        fprintf(stderr, "(%d bytes received)\n", (int) num);
 
         size_t sent1 = microtcp_send(client, "echo: ", 6, false, &errcode);
         if (errcode) {
             fprintf(stderr, "Error: %s\n", microtcp_strerror(errcode));
             goto handled;
         }
-        fprintf(stderr, "(%ld bytes sent 1)\n", sent1);
+        fprintf(stderr, "(%d bytes sent 1)\n", (int) sent1);
 
         size_t sent2 = microtcp_send(client, buffer, num, false, &errcode);
         if (errcode) {
             fprintf(stderr, "Error: %s\n", microtcp_strerror(errcode));
             goto handled;
         }
-        fprintf(stderr, "(%ld bytes sent 2)\n", sent2);
+        fprintf(stderr, "(%d bytes sent 2)\n", (int) sent2);
 
 handled:
         microtcp_close(client);

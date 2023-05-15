@@ -1,5 +1,5 @@
 #include <string.h>
-#include <arpa/inet.h>
+#include "endian.h"
 #include "icmp.h"
 
 #ifdef ICMP_DEBUG
@@ -57,12 +57,12 @@ static uint16_t calculate_checksum_icmp(const void *src, size_t len)
 
     uint32_t sum = 0xffff;
     for (size_t i = 0; i < len/2; i++) {
-        sum += ntohs(src2[i]);
+        sum += net_to_cpu_u16(src2[i]);
         if (sum > 0xffff)
             sum -= 0xffff;
     }
 
-    return htons(~sum);
+    return cpu_to_net_u16(~sum);
 }
 
 void icmp_process_packet(icmp_state_t *state, ip_address_t ip, const void *src, size_t len)

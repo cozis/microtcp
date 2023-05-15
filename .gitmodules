@@ -1,0 +1,6 @@
+[submodule "3p/libtuntap"]
+	path = 3p/libtuntap
+	url = https://github.com/cozis/libtuntap.git
+[submodule "3p/tinycthread"]
+	path = 3p/tinycthread
+	url = https://github.com/tinycthread/tinycthread.git

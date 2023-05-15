@@ -1,6 +1,6 @@
 #include <string.h>
 #include <stdbool.h>
-#include <arpa/inet.h>
+#include "endian.h"
 #include "tcp.h"
 
 #ifdef TCP_DEBUG
@@ -186,13 +186,13 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
         const size_t    len = slices[slice_idx].len;
 
         for (size_t i = 0; i < len/2; i++) {
-            sum += ntohs(src[i]);
+            sum += net_to_cpu_u16(src[i]);
             if (sum > 0xffff)
                 sum -= 0xffff;
         }
     }
 
-    return htons(~sum);
+    return cpu_to_net_u32(~sum);
 }
 
 static void 
@@ -249,14 +249,14 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
     //    seq_no++;
 
     tcp_segment_t header = {
-        .src_port = htons(listener->port),
-        .dst_port = htons(connection->peer_port),
+        .src_port = cpu_to_net_u32(listener->port),
+        .dst_port = cpu_to_net_u32(connection->peer_port),
         .flags    = flags,
-        .seq_no   = htonl(seq_no),
-        .ack_no   = htonl(ack_no),
+        .seq_no   = cpu_to_net_u32(seq_no),
+        .ack_no   = cpu_to_net_u32(ack_no),
         .offset   = 5, // No options
         .unused   = 0,
-        .window   = htons(connection->rcv_wnd),
+        .window   = cpu_to_net_u32(connection->rcv_wnd),
         .checksum = 0, // Will be calculated later
         .urgent_pointer = 0,
     };
@@ -266,7 +266,7 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
         .dst_addr = connection->peer_ip,
         .reserved = 0,
         .protocol = 6, // TCP
-        .tcp_length = htons(total_segment_size),
+        .tcp_length = cpu_to_net_u32(total_segment_size),
     };
 
     header.checksum = calculate_checksum((slice_list_t[]) {
@@ -329,8 +329,8 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
     if (len < sizeof(tcp_segment_t))
         return;
 
-    uint16_t reordered_dst_port = ntohs(segment->dst_port);
-    uint16_t reordered_src_port = ntohs(segment->src_port);
+    uint16_t reordered_dst_port = net_to_cpu_u16(segment->dst_port);
+    uint16_t reordered_src_port = net_to_cpu_u16(segment->src_port);
 
     tcp_listener_t *listener = find_listener_with_port(state, reordered_dst_port);
     if (listener == NULL) {
@@ -362,7 +362,7 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
 
             // Temporary
             uint32_t seq_no = choose_sequence_no();
-            uint32_t ack_no = ntohl(segment->seq_no)+1;
+            uint32_t ack_no = net_to_cpu_u32(segment->seq_no)+1;
             
             tcp_connection_t *connection = connection_create_waiting_for_ack(listener, seq_no, ack_no, sender, reordered_src_port);
             if (connection == NULL) {
@@ -389,7 +389,7 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
                 return;
             }
 
-            uint32_t ack_no = ntohl(segment->ack_no);
+            uint32_t ack_no = net_to_cpu_u32(segment->ack_no);
 
             if (ack_no <= connection->snd_una)
                 TCP_DEBUG_LOG("Received segment acknowledged again %d", ack_no);

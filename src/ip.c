@@ -1,5 +1,5 @@
 #include <string.h>
-#include <arpa/inet.h> // ntohs()
+#include "endian.h"
 #include "ip.h"
 
 #ifdef IP_DEBUG
@@ -18,12 +18,12 @@ static uint16_t calculate_checksum_ip(const void *src, size_t len)
 
     uint32_t sum = 0xffff;
     for (size_t i = 0; i < len/2; i++) {
-        sum += ntohs(src2[i]);
+        sum += net_to_cpu_u16(src2[i]);
         if (sum > 0xffff)
             sum -= 0xffff;
     }
 
-    return htons(~sum);
+    return cpu_to_net_u16(~sum);
 }
 
 
@@ -59,8 +59,8 @@ bool ip_plug_protocol(ip_state_t *ip_state, uint8_t protocol,
 
 static bool is_packet_one_of_more_fragments(const ip_packet_t *packet)
 {
-    size_t offset = ntohs(packet->fragment_offset) & 0x1FFF;
-    bool more_fragments = ntohs(packet->fragment_offset) & 0x2000;
+    size_t offset = net_to_cpu_u16(packet->fragment_offset) & 0x1FFF;
+    bool more_fragments = net_to_cpu_u16(packet->fragment_offset) & 0x2000;
     return more_fragments || offset;
 }
 
@@ -73,7 +73,7 @@ static void send_icmp_packet(void *data, ip_address_t ip, size_t len)
     packet->version = 4;
     packet->header_length = 5;
     packet->type_of_service = 0; // ???
-    packet->total_length = htons(sizeof(ip_packet_t) + len);
+    packet->total_length = cpu_to_net_u16(sizeof(ip_packet_t) + len);
     packet->id = ip_state->next_id++;
     packet->fragment_offset = 0; // ???
     packet->time_to_live = 32; // ???
@@ -166,7 +166,7 @@ int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst,
         packet->version = 4;
         packet->header_length = 5;
         packet->type_of_service = 0; // ???
-        packet->total_length = htons(sizeof(ip_packet_t) + considered_payload);
+        packet->total_length = cpu_to_net_u16(sizeof(ip_packet_t) + considered_payload);
         packet->id = state->next_id++;
         packet->fragment_offset = 0; // ???
         packet->time_to_live = 32; // ???
@@ -231,7 +231,7 @@ void ip_process_packet(ip_state_t *ip_state, const void *packet, size_t len)
     ip_plugged_protocol_t *handler = find_protocol_with_id(ip_state, packet2->protocol);
 
     const void *packet3_ptr = packet2+1;
-    size_t      packet3_len = ntohs(packet2->total_length) - sizeof(ip_packet_t);
+    size_t      packet3_len = net_to_cpu_u16(packet2->total_length) - sizeof(ip_packet_t);
 
     if (handler)
         handler->process_packet(handler->data, packet2->src_ip, packet3_ptr, packet3_len);

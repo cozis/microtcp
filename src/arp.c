@@ -115,7 +115,7 @@ struct ethhdr {
 */
 
 #include <stdbool.h>
-#include <arpa/inet.h>
+#include "endian.h"
 #include "arp.h"
 
 #ifdef ARP_DEBUG
@@ -616,11 +616,11 @@ void arp_resolve_mac(arp_state_t *state, ip_address_t ip, void *userp, void (*ca
         append_pending_request_to_used_list(state, pending_request);
         
         arp_packet_t *packet = state->output;
-        packet->hardware_type = htons(ARP_HARDWARE_ETHERNET);
-        packet->protocol_type = htons(ARP_PROTOCOL_IP);
+        packet->hardware_type = cpu_to_net_u16(ARP_HARDWARE_ETHERNET);
+        packet->protocol_type = cpu_to_net_u16(ARP_PROTOCOL_IP);
         packet->hardware_len = 6;
         packet->protocol_len = 4;
-        packet->operation_type = htons(ARP_OPERATION_REQUEST);
+        packet->operation_type = cpu_to_net_u16(ARP_OPERATION_REQUEST);
         packet->sender_hardware_address = state->self_mac;
         packet->sender_protocol_address = state->self_ip;
         packet->target_hardware_address = MAC_ZERO; // This is what we're trying to find
@@ -677,13 +677,13 @@ arp_process_result_t arp_process_packet(arp_state_t *state, const void *packet, 
 
     const arp_packet_t *packet2 = packet;
 
-    if (packet2->hardware_type != htons(ARP_HARDWARE_ETHERNET)) {
+    if (packet2->hardware_type != cpu_to_net_u16(ARP_HARDWARE_ETHERNET)) {
         /* Level 2 protocol not supported */
         ARP_DEBUG_LOG("Hardware type %d not supported", packet2->hardware_type);
         return ARP_PROCESS_RESULT_HWARENOTSUPP;
     }
 
-    if (packet2->protocol_type != htons(ARP_PROTOCOL_IP)) {
+    if (packet2->protocol_type != cpu_to_net_u16(ARP_PROTOCOL_IP)) {
         /* Level 3 protocol not supported */
         ARP_DEBUG_LOG("Protocol type %d not supported", packet2->protocol_type);
         return ARP_PROCESS_RESULT_PROTONOTSUPP;
@@ -707,7 +707,7 @@ arp_process_result_t arp_process_packet(arp_state_t *state, const void *packet, 
                                            packet2->sender_hardware_address);
         }
 
-        if (packet2->operation_type == htons(ARP_OPERATION_REQUEST)) {
+        if (packet2->operation_type == cpu_to_net_u16(ARP_OPERATION_REQUEST)) {
             
             // Generate the ARP REPLY
             
@@ -716,7 +716,7 @@ arp_process_result_t arp_process_packet(arp_state_t *state, const void *packet, 
             response->protocol_type = packet2->protocol_type;
             response->hardware_len  = packet2->hardware_len;
             response->protocol_len  = packet2->protocol_len;
-            response->operation_type = htons(ARP_OPERATION_REPLY);
+            response->operation_type = cpu_to_net_u16(ARP_OPERATION_REPLY);
             response->sender_hardware_address = state->self_mac;
             response->sender_protocol_address = state->self_ip;
             response->target_hardware_address = packet2->sender_hardware_address;
