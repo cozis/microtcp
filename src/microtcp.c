@@ -513,7 +513,7 @@ static bool parse_ip(const char *ip, ip_address_t *parsed_ip)
         // other than the address in it.
         return false;
 
-    *parsed_ip = value;
+    *parsed_ip = cpu_to_net_u32(value);
     return true;
 }
 
