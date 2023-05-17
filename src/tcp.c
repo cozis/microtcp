@@ -19,7 +19,6 @@ void tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks
         tcp_state->connection_pool[i].next = tcp_state->connection_pool + i+1;
     tcp_state->connection_pool[TCP_MAX_SOCKETS-1].next = NULL;
     tcp_state->free_connection_list = tcp_state->connection_pool;
-    tcp_state->used_connection_list = NULL;
 
     for (size_t i = 0; i < TCP_MAX_LISTENERS-1; i++)
         tcp_state->listener_pool[i].next = tcp_state->listener_pool + i+1;
@@ -42,9 +41,9 @@ void tcp_seconds_passed(tcp_state_t *state, size_t seconds)
 }
 
 static tcp_connection_t*
-connection_create_waiting_for_ack(tcp_listener_t *listener, 
-                              uint32_t seq_no, uint32_t ack_no,
-                              ip_address_t peer_ip, uint16_t peer_port)
+connection_create(tcp_listener_t *listener, 
+                  uint32_t seq_no, uint32_t ack_no,
+                  ip_address_t peer_ip, uint16_t peer_port)
 {
     tcp_state_t *state = listener->state;
 
@@ -66,6 +65,8 @@ connection_create_waiting_for_ack(tcp_listener_t *listener,
         connection->callback_ready_to_recv = NULL;
         connection->callback_ready_to_send = NULL;
 
+        connection->state = TCP_STATE_CLOSED;
+
         connection->peer_port = peer_port;
         connection->peer_ip   = peer_ip;
 
@@ -81,15 +82,11 @@ connection_create_waiting_for_ack(tcp_listener_t *listener,
         connection->next = NULL;
     }
 
-    // Append the connection to the list of connections
-    // waiting for the ACK message
-    {
-        if (listener->connections_waiting_for_ack)
-            listener->connections_waiting_for_ack->prev = connection;
-        connection->prev = NULL;
-        connection->next = listener->connections_waiting_for_ack;
-        listener->connections_waiting_for_ack = connection;
-    }
+    // Appent to the list of not yet established connections 
+    if (listener->non_established_list)
+        listener->non_established_list->prev = connection;
+    connection->next = listener->non_established_list;
+    listener->non_established_list = connection;
 
     return connection;
 }
@@ -104,57 +101,6 @@ find_listener_with_port(tcp_state_t *state, uint16_t port)
         cursor = cursor->next;
     }
     return NULL;
-}
-
-#include <stdio.h>
-
-typedef enum {
-    SOCKET_WAIT,
-    SOCKET_IDLE,
-    SOCKET_NONE,
-} connection_state_t;
-
-static tcp_connection_t *find_connection(tcp_connection_t *list, ip_address_t peer_ip, uint16_t peer_port)
-{
-    tcp_connection_t *cursor = list;
-
-    while (cursor) {
-        if (cursor->peer_ip == peer_ip && cursor->peer_port == peer_port)
-            return cursor;
-        cursor = cursor->next;
-    }
-
-    return NULL;
-}
-
-static connection_state_t 
-find_connection_associated_to(tcp_listener_t *listener, ip_address_t peer_ip, 
-                              uint16_t peer_port, tcp_connection_t **connection)
-{
-    tcp_connection_t *connection2 = find_connection(listener->connections, peer_ip, peer_port);
-    if (connection2) {
-        if (connection)
-            *connection = connection2;
-        return SOCKET_IDLE;
-    }
-
-    connection2 = find_connection(listener->connections_waiting_for_accept_head, peer_ip, peer_port);
-    if (connection2) {
-        if (connection)
-            *connection = connection2;
-        return SOCKET_IDLE;
-    }
-
-    connection2 = find_connection(listener->connections_waiting_for_ack, peer_ip, peer_port);
-    if (connection2) {
-        if (connection)
-            *connection = connection2;
-        return SOCKET_WAIT;
-    }
-
-    if (connection)
-        *connection = NULL;
-    return SOCKET_NONE;
 }
 
 static uint32_t choose_sequence_no()
@@ -191,38 +137,6 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
     return cpu_to_net_u32(~sum);
 }
 
-static void 
-move_connection_from_wait_for_ack_to_wait_for_accept(tcp_connection_t *connection)
-{
-    tcp_listener_t *listener = connection->listener;
-    
-    // Unlink it from the current list
-    if (connection->prev)
-        connection->prev->next = connection->next;
-    else
-        listener->connections_waiting_for_ack = connection->next;
-
-    if (connection->next)
-        connection->next->prev = connection->prev;
-
-
-    // Push it to the new one
-    connection->prev = NULL;
-    connection->next = listener->connections_waiting_for_accept_head;
-
-    if (listener->connections_waiting_for_accept_head)
-        // Accept queue isn't empty
-        listener->connections_waiting_for_accept_head->prev = connection;
-    else
-        // Accept queue is empty
-        listener->connections_waiting_for_accept_tail = connection;
-    listener->connections_waiting_for_accept_head = connection;
-
-
-    if (listener->callback_ready_to_accept)
-        listener->callback_ready_to_accept(listener->callback_data);
-}
-
 static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_t payload)
 {
     tcp_listener_t *listener = connection->listener;
@@ -245,8 +159,8 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
     //    seq_no++;
 
     tcp_segment_t header = {
-        .src_port = cpu_to_net_u32(listener->port),
-        .dst_port = cpu_to_net_u32(connection->peer_port),
+        .src_port = cpu_to_net_u16(listener->port),
+        .dst_port = cpu_to_net_u16(connection->peer_port),
         .flags    = flags,
         .seq_no   = cpu_to_net_u32(seq_no),
         .ack_no   = cpu_to_net_u32(ack_no),
@@ -312,114 +226,242 @@ static void handle_received_data(tcp_connection_t *connection,
     }
 }
 
+static tcp_connection_t*
+find_connection_associated_to_listener(tcp_listener_t *listener, 
+                                       ip_address_t peer_ip, uint16_t peer_port)
+{
+    tcp_connection_t *connection;
+
+    // Check in the accepted list
+    connection = listener->accepted_list;
+    while (connection) {
+        if (connection->peer_port == peer_port && connection->peer_ip == peer_ip)
+            break;
+        connection = connection->next;
+    }
+    if (connection) {
+        // accepted=true
+    } else {
+        // accepted=false
+        connection = listener->non_accepted_queue_head;
+        while (connection) {
+            if (connection->peer_port == peer_port && connection->peer_ip == peer_ip)
+                break;
+            connection = connection->next;
+        }
+    }
+
+    return connection;
+}
+
+static void 
+move_from_non_established_list_to_non_accepted_queue(tcp_connection_t *connection)
+{
+    tcp_listener_t *listener = connection->listener;
+
+    // Unlink the structure from the non established list
+    {
+        if (connection->prev)
+            connection->prev->next = connection->next;
+        else
+            listener->non_established_list = connection->next;
+
+        if (connection->next)
+            connection->next->prev = connection->prev;
+    }
+
+    // Push it into the non accepted queue
+    connection->prev = NULL;
+    connection->next = listener->non_accepted_queue_head;
+    if (listener->non_accepted_queue_head)
+        listener->non_accepted_queue_head->prev = connection;
+    else
+        listener->non_accepted_queue_tail = connection;
+    listener->non_accepted_queue_head = connection;
+}
+
 void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
                          tcp_segment_t *segment, size_t len)
 {
-    (void) state;
-    (void) sender;
-    (void) segment;
-    (void) len;
-
     TCP_DEBUG_LOG("Received TCP segment");
 
-    if (len < sizeof(tcp_segment_t))
-        return;
+    assert(len >= sizeof(tcp_segment_t));
+    size_t data_offset = segment->offset * sizeof(uint32_t); // Length (in bytes) of the TCP header,
+                                                             // comprehensive of options.
+
+    size_t options_len = data_offset - sizeof(tcp_segment_t); // The number of bytes of the options is
+                                                              // the size of the whole header minus the
+                                                              // size of the header without options.
+    size_t payload_size = len - data_offset;
+    void  *payload_addr = (uint8_t*) segment + data_offset; // The segment->payload doesn't refer to the
+                                                            // first byte of the payload but to the first
+                                                            // byte of the options!! Use this variable to
+                                                            // get the payload.
 
     uint16_t reordered_dst_port = net_to_cpu_u16(segment->dst_port);
     uint16_t reordered_src_port = net_to_cpu_u16(segment->src_port);
 
     tcp_listener_t *listener = find_listener_with_port(state, reordered_dst_port);
     if (listener == NULL) {
-        // No connection is listening on this port. Silently drop the packet.
+        // No connection is listening on this port. Silently drop the segment
         TCP_DEBUG_LOG("Segment sent to port %d, which is closed", reordered_dst_port);
         return;
     }
 
-    tcp_connection_t *connection;
-    connection_state_t connection_state = find_connection_associated_to(listener, sender, reordered_src_port, &connection);
-    
-    if (segment->flags & TCP_FLAG_SYN) {
+    tcp_connection_t *connection = find_connection_associated_to_listener(listener, sender, reordered_src_port);
+    if (!connection) {
+        // Something sent to an open listener. 
 
-        if (segment->flags & TCP_FLAG_ACK) {
-
-            // Drop the packet. We only do servers for now!
-            #warning "TODO: Handle TCP second message of three way handshake"
-
-        } else {
-    
-            /* Connection request */
-
-            if (connection_state != SOCKET_NONE) {
-                // Peer wants to connect, but a connection was already created..
-                // What to do?
-                #warning "TODO: Handle case where an existing connection recieved the SYN message"
-                return;
-            }
-
-            // Temporary
-            uint32_t seq_no = choose_sequence_no();
-            uint32_t ack_no = net_to_cpu_u32(segment->seq_no)+1;
-            
-            tcp_connection_t *connection = connection_create_waiting_for_ack(listener, seq_no, ack_no, sender, reordered_src_port);
-            if (connection == NULL) {
-                // ERROR: Socket limit reached. Drop the connection silently
-                #warning "TODO: Handle connection limit reached (RST?)"
-                return;
-            }
-
-            emit_segment(connection, true, true, 0);
-            connection->snd_una++;
+        // We expect it to be a request to connect,
+        // which means that the segment should have
+        // the SYN flag high (and only that one).
+        // If that's true, a connection object must
+        // be instanciated and a SYN|ACK message sent.
+        //
+        // Alongside the SYN, some payload may be
+        // associated with the message. Though we must
+        // make sure that this data isn't delivered to
+        // the parent application until the connection
+        // is fully established.
+        //
+        // From RFC 793, section 3.4:
+        //
+        // > Several examples of connection initiation follow.  Although these
+        // > examples do not show connection synchronization using data-carrying
+        // > segments, this is perfectly legitimate, so long as the receiving TCP
+        // > doesn't deliver the data to the user until it is clear the data is
+        // > valid (i.e., the data must be buffered at the receiver until the
+        // > connection reaches the ESTABLISHED state).  The three-way handshake
+        // > reduces the possibility of false connections.
+        //
+        // (https://www.ietf.org/rfc/rfc793.txt)
+        
+        if (!(segment->flags & TCP_FLAG_SYN)) {
+            // Received message isn't SYN. Ignore the segment.
+            TCP_DEBUG_LOG("Connection request is missing the SYN flag");
+            return;
         }
+
+        if (segment->flags & ~TCP_FLAG_SYN)
+            TCP_DEBUG_LOG("Connection request segment has flags other than SYN set");
+
+        if (payload_size > 0) {
+            TCP_DEBUG_LOG("Connection request segment has some payload. "
+                          "This is a valid behaviour but we don't handle "
+                          "that case yet. Droppong the connection");
+            return;
+        }
+
+        uint32_t seq_no = choose_sequence_no();
+        uint32_t ack_no = net_to_cpu_u32(segment->seq_no)+1;
+            
+        connection = connection_create(listener, seq_no, ack_no, sender, reordered_src_port);
+        if (connection == NULL) {
+            TCP_DEBUG_LOG("Connection limit reached");
+            // Should we let the peer know what happened?
+            return;
+        }
+        connection->state = TCP_STATE_SYN_RCVD;
+
+        emit_segment(connection, true, true, 0);
+        connection->snd_una++;
+
+        TCP_DEBUG_LOG("Connection request handled");
 
     } else {
-
-        if (segment->flags & TCP_FLAG_ACK) {
-
-            if (connection_state == SOCKET_WAIT)
-                move_connection_from_wait_for_ack_to_wait_for_accept(connection);
-            else if (connection_state == SOCKET_IDLE) {
-
-            } else {
-                #warning "TODO: Handle case where no connection exists"
-                assert(connection_state == SOCKET_NONE);
-                return;
-            }
-
-            uint32_t ack_no = net_to_cpu_u32(segment->ack_no);
-
-            if (ack_no <= connection->snd_una)
-                TCP_DEBUG_LOG("Received segment acknowledged again %d", ack_no);
-            else {
-                if (ack_no > connection->snd_nxt) {
-                    TCP_DEBUG_LOG("Received segment acknowledged unsent data with sequence number %d, but %d still wasn't sent", ack_no, connection->snd_nxt);
-                    return; // Acknowledged unsent data
-                }
+        // Something sent to an already instanciated
+        // connection. Since there is an instance, it
+        // means that at least the first SYN was received
+        // and a SYN|ACK message was sent, so the 
+        // first state of a connection is SYN_RCVD
+        switch (connection->state) {
             
-                size_t newly_acked_bytes = ack_no - connection->snd_una;
-                memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
-                connection->snd_wnd -= newly_acked_bytes;
-                connection->snd_una = ack_no;
+            case TCP_STATE_CLOSED:
+            // This state is only used for uninitialized
+            // connection structures. If the code behaves
+            // well, this code should be unreachable.
+            assert(0);
+            break;
 
-                // Now there's space available in the output buffer
-                if (connection->callback_ready_to_send)
-                    connection->callback_ready_to_send(connection->callback_data);
-            }
+            case TCP_STATE_SYN_SENT:
+            // This is the state where we sent SYN to initiate 
+            // the connection with a peer acting as server.
+            // At the moment "microtcp_connect" isn't implemented
+            // so this state can never be reached.
+            assert(0); // UNREACHABLE
+            break;
+            
+            case TCP_STATE_SYN_RCVD:
+            
+            // At this point a SYN was received and a SYN|ACK sent.
+            // We expect an ACK to establish the connection.
 
-        } else {
-
-            if (connection_state != SOCKET_IDLE) {
-                // Either there is no connection associated to this peer
-                // at this port, or the connection is waiting for an ACK.
-                // What to do?
-                #warning "TODO: Handle case where unexpected TCP data message is received"
+            if (!(segment->flags & TCP_FLAG_ACK))
+                // This isn't what we expected. Ignore it (this is
+                // probably not the best action)
                 return;
-            }
-        }
-        handle_received_data(connection, segment->payload, 
-                             len - sizeof(tcp_segment_t));
+            
+            if (segment->flags & ~TCP_FLAG_ACK)
+                TCP_DEBUG_LOG("Incoming segment has flags other than ACK set when just an ACK was expected");
+            if (payload_size > 0)
+                TCP_DEBUG_LOG("Incoming segment has a payload alongside the ACK for "
+                              "the SYN we sent. This is valid TCP but we don't support "
+                              "this case yet. We'll just ignore the data. Hopefully "
+                              "the peer will retransmit it");
+            // The connection is now established.
+            connection->state = TCP_STATE_ESTAB;
 
-        if (segment->flags & TCP_FLAG_FIN) {
-            #warning "TODO: Handle FIN segment"
+            move_from_non_established_list_to_non_accepted_queue(connection);
+
+            if (listener->callback_ready_to_accept)
+                listener->callback_ready_to_accept(listener->callback_data);
+            break;
+
+            case TCP_STATE_ESTAB:
+            if (segment->flags & TCP_FLAG_ACK) {
+
+                uint32_t ack_no = net_to_cpu_u32(segment->ack_no);
+
+                if (ack_no <= connection->snd_una)
+                    TCP_DEBUG_LOG("Received segment acknowledged again %d", ack_no);
+                else {
+                    if (ack_no > connection->snd_nxt) {
+                        // Peer ACKed unsent data. The right course of action
+                        // is probably to drop the connection.
+                        TCP_DEBUG_LOG("Received segment acknowledged unsent data "
+                                      "with sequence number %d, but %d still wasn't sent", 
+                                      ack_no, connection->snd_nxt);
+                        return; // For now we'll just ignore the segment.
+                    }
+                
+                    size_t newly_acked_bytes = ack_no - connection->snd_una;
+                    memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
+                    connection->snd_wnd -= newly_acked_bytes;
+                    connection->snd_una = ack_no;
+
+                    // Now there's space available in the output buffer
+                    if (connection->callback_ready_to_send)
+                        connection->callback_ready_to_send(connection->callback_data);
+                }
+            }
+
+            handle_received_data(connection, payload_addr, payload_size);
+
+            if (segment->flags & TCP_FLAG_FIN) {
+                
+                // Send ACK for the FIN
+                emit_segment(connection, true, false, 0);
+                connection->snd_una++; // emit_segment doesn't increment the "snd_una" for ghost bytes
+
+                connection->state = TCP_STATE_CLOSE_WAIT;
+            }
+            break;
+            
+            case TCP_STATE_FIN_WAIT_1:break;
+            case TCP_STATE_FIN_WAIT_2:break;
+            case TCP_STATE_CLOSE_WAIT:break;
+            case TCP_STATE_LAST_ACK:break;
+            case TCP_STATE_TIME_WAIT:break;
         }
     }
 }
@@ -446,11 +488,10 @@ tcp_listener_create(tcp_state_t *state, uint16_t port, void *callback_data,
     // Initialize listener structure
     listener->state = state;
     listener->port = port;
-    listener->connections = NULL;
-    listener->connections_waiting_for_ack = NULL;
-    listener->connections_waiting_for_fin = NULL;
-    listener->connections_waiting_for_accept_head = NULL;
-    listener->connections_waiting_for_accept_tail = NULL;
+    listener->accepted_list = NULL;
+    listener->non_established_list = NULL;
+    listener->non_accepted_queue_head = NULL;
+    listener->non_accepted_queue_tail = NULL;
     listener->callback_data = callback_data;
     listener->callback_ready_to_accept = callback_ready_to_accept;
 
@@ -496,29 +537,38 @@ tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_d
 {
     (void) listener;
 
-    if (!listener->connections_waiting_for_accept_tail)
+    if (!listener->non_accepted_queue_head)
+        // Nothing to accept
         return NULL;
 
     tcp_connection_t *connection;
 
-    // Pop connection from the accept queue
+    // Pop connection from the tail of the accept queue
     {
-        connection = listener->connections_waiting_for_accept_tail;
+        connection = listener->non_accepted_queue_tail;
         if (connection->prev)
+            // ->prev isn't NULL so this isn't the first element of 
+            // the queue. Therefore we need to update the ->next pointer
+            // of the previous node.
             connection->prev->next = NULL;
         else
-            listener->connections_waiting_for_accept_head = NULL;
-        listener->connections_waiting_for_accept_tail = connection->next;
+            // ->prev is NULL so this is the first element of the queue.
+            // We need to update the reference to the head of the list
+            listener->non_accepted_queue_head = NULL;
+
+        assert(connection->next == NULL); // This is the last element of the queue so
+                                          // it has no following node.
+        listener->non_accepted_queue_tail = NULL;
     }
 
-    // Push it to idle list
+    // Push it to the head of the accepted list
     {
         connection->prev = NULL;
-        connection->next = listener->connections;
+        connection->next = listener->accepted_list;
 
-        if (listener->connections)
-            listener->connections->prev = connection;
-        listener->connections = connection;
+        if (listener->accepted_list)
+            listener->accepted_list->prev = connection;
+        listener->accepted_list = connection;
     }
 
     connection->callback_data = callback_data;
@@ -528,10 +578,36 @@ tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_d
     return connection;
 }
 
+#ifdef TCP_DEBUG
+static bool connection_was_accepted(tcp_connection_t *connection)
+{
+    // Get the listener that's associated to
+    // the connection and iterate over it's
+    // accepted connections list to make sure
+    // that is contains the connection.
+
+    tcp_listener_t *listener = connection->listener;
+
+    tcp_connection_t *cursor = listener->accepted_list;
+
+    while (cursor) {
+        if (cursor == connection)
+            return true;
+        cursor = cursor->next;
+    }
+    return false;
+} 
+#endif
+
 void tcp_connection_destroy(tcp_connection_t *connection)
 {
     // NOTE: This can only be called when the
-    //       connection was accepted.
+    //       connection was accepted, so it must
+    //       be a node of the accepted_list.
+
+#ifdef TCP_DEBUG
+    assert(connection_was_accepted(connection));
+#endif
 
     // Make sure the connection was first finished
     // by being moved from the idle list to the
@@ -544,7 +620,7 @@ void tcp_connection_destroy(tcp_connection_t *connection)
     if (connection->prev)
         connection->prev->next = connection->next;
     else
-        listener->connections_waiting_for_fin = connection->next;
+        listener->accepted_list = connection->next;
 
     // Push it into the free connection list
     tcp_state_t *state = listener->state;
@@ -588,18 +664,14 @@ append_to_output_buffer(tcp_connection_t *connection,
 
 size_t tcp_connection_send(tcp_connection_t *connection, const void *src, size_t len)
 {
-    size_t num;
-    if (connection->read_only)
-        num = 0;
-    else {
-        num = append_to_output_buffer(connection, src, len);
-        emit_segment(connection, false, false, SIZE_MAX);
-    }
+    size_t num = append_to_output_buffer(connection, src, len);
+    emit_segment(connection, false, false, SIZE_MAX);
     return num;
 }
 
 void tcp_connection_finish(tcp_connection_t *connection)
 {
+/*
     if (!connection->read_only) {
 
         // Move connection from idle list to 
@@ -633,4 +705,5 @@ void tcp_connection_finish(tcp_connection_t *connection)
         // Now mark the connection as read-only
         connection->read_only = true;
     }
+*/
 }

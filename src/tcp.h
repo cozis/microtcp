@@ -43,19 +43,17 @@ struct tcp_listener_t {
     tcp_listener_t *prev;
     tcp_listener_t *next;
     uint16_t port;
-    tcp_connection_t *connections;
-    tcp_connection_t *connections_waiting_for_ack;
-    tcp_connection_t *connections_waiting_for_accept_head;
-    tcp_connection_t *connections_waiting_for_accept_tail;
-    tcp_connection_t *connections_waiting_for_fin;
+    tcp_connection_t *accepted_list;
+    tcp_connection_t *non_established_list;
+    tcp_connection_t *non_accepted_queue_head;
+    tcp_connection_t *non_accepted_queue_tail;
 
     void (*callback_ready_to_accept)(void*);
     void  *callback_data;
 };
 
 typedef enum {
-    TCP_STATE_CLOSED,
-    TCP_STATE_LISTEN,
+    TCP_STATE_CLOSED = 0,
     TCP_STATE_SYN_SENT,
     TCP_STATE_SYN_RCVD,
     TCP_STATE_ESTAB,
@@ -64,7 +62,7 @@ typedef enum {
     TCP_STATE_CLOSE_WAIT,
     TCP_STATE_LAST_ACK,
     TCP_STATE_TIME_WAIT,
-} tcp_state_t;
+} tcp_connstate_t;
 
 struct tcp_connection_t {
     tcp_listener_t   *listener; // Listener that accepted this connection
@@ -75,7 +73,7 @@ struct tcp_connection_t {
     void (*callback_ready_to_recv)(void*);
     void (*callback_ready_to_send)(void*);
     
-    bool read_only;
+    tcp_connstate_t state;
 
     ip_address_t peer_ip; // Network byte order
     uint16_t     peer_port; // CPU byte order
@@ -122,7 +120,6 @@ typedef struct {
 struct tcp_state_t {
     ip_address_t ip;
     tcp_callbacks_t callbacks;
-    tcp_connection_t *used_connection_list;
     tcp_connection_t *free_connection_list;
     tcp_connection_t connection_pool[TCP_MAX_SOCKETS];
     tcp_listener_t *used_listener_list;
