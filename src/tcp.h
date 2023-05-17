@@ -53,6 +53,19 @@ struct tcp_listener_t {
     void  *callback_data;
 };
 
+typedef enum {
+    TCP_STATE_CLOSED,
+    TCP_STATE_LISTEN,
+    TCP_STATE_SYN_SENT,
+    TCP_STATE_SYN_RCVD,
+    TCP_STATE_ESTAB,
+    TCP_STATE_FIN_WAIT_1,
+    TCP_STATE_FIN_WAIT_2,
+    TCP_STATE_CLOSE_WAIT,
+    TCP_STATE_LAST_ACK,
+    TCP_STATE_TIME_WAIT,
+} tcp_state_t;
+
 struct tcp_connection_t {
     tcp_listener_t   *listener; // Listener that accepted this connection
     tcp_connection_t *next;

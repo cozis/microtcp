@@ -695,6 +695,16 @@ arp_process_result_t arp_process_packet(arp_state_t *state, const void *packet, 
         return ARP_PROCESS_RESULT_INVALID;
     }
 
+    ARP_DEBUG_LOG("ARP from %d.%d.%d.%d to %d.%d.%d.%d",
+        ((uint8_t*) &packet2->sender_protocol_address)[0],
+        ((uint8_t*) &packet2->sender_protocol_address)[1],
+        ((uint8_t*) &packet2->sender_protocol_address)[2],
+        ((uint8_t*) &packet2->sender_protocol_address)[3],
+        ((uint8_t*) &packet2->target_protocol_address)[0],
+        ((uint8_t*) &packet2->target_protocol_address)[1],
+        ((uint8_t*) &packet2->target_protocol_address)[2],
+        ((uint8_t*) &packet2->target_protocol_address)[3]);
+
     bool merge = arp_translation_table_update(&state->table, packet2->sender_hardware_address, 
                                               packet2->sender_protocol_address, state->cache_timeout);
 

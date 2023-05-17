@@ -26,7 +26,7 @@
 #endif
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-#define   LOCK_WHEN_THREADED(mtcp) do { mtx_lock(&(mtcp)->lock);   } while (0);
+#define   LOCK_WHEN_THREADED(mtcp) do {   mtx_lock(&(mtcp)->lock); } while (0);
 #define UNLOCK_WHEN_THREADED(mtcp) do { mtx_unlock(&(mtcp)->lock); } while (0);
 #else
 #define   LOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);

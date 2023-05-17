@@ -223,6 +223,16 @@ void ip_process_packet(ip_state_t *ip_state, const void *packet, size_t len)
         return;
     }
 
+    IP_DEBUG_LOG("Received packet for %d.%d.%d.%d (I'm %d.%d.%d.%d)", 
+        ((uint8_t*) &packet2->dst_ip)[0],
+        ((uint8_t*) &packet2->dst_ip)[1],
+        ((uint8_t*) &packet2->dst_ip)[2],
+        ((uint8_t*) &packet2->dst_ip)[3],
+        ((uint8_t*) &ip_state->ip)[0],
+        ((uint8_t*) &ip_state->ip)[1],
+        ((uint8_t*) &ip_state->ip)[2],
+        ((uint8_t*) &ip_state->ip)[3]);
+
     if (packet2->dst_ip != ip_state->ip) {
         IP_DEBUG_LOG("Packet not for me");
         return;

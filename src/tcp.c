@@ -41,10 +41,6 @@ void tcp_seconds_passed(tcp_state_t *state, size_t seconds)
     (void) seconds;
 }
 
-typedef enum {
-    TCP_CONNECTION_
-} tcp_connection_state;
-
 static tcp_connection_t*
 connection_create_waiting_for_ack(tcp_listener_t *listener, 
                               uint32_t seq_no, uint32_t ack_no,
