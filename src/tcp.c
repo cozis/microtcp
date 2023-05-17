@@ -1,5 +1,6 @@
 #include <string.h>
 #include <stdbool.h>
+#include <stdalign.h>
 #include "endian.h"
 #include "tcp.h"
 
@@ -125,12 +126,23 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
 
     for (size_t slice_idx = 0; slice_idx < num_slices; slice_idx++) {
         
-        assert((slices[slice_idx].len & 1) == 0);
         const uint16_t *src = slices[slice_idx].src;
         const size_t    len = slices[slice_idx].len;
 
         for (size_t i = 0; i < len/2; i++) {
             sum += net_to_cpu_u16(src[i]);
+            if (sum > 0xffff)
+                sum -= 0xffff;
+        }
+
+        if (len & 1) {
+            alignas(uint16_t) uint8_t temp[2];
+            
+            temp[0] = ((uint8_t*) slices[slice_idx].src)[len-1];
+            temp[1] = 0;
+
+            uint16_t temp2 = *(uint16_t*) temp;
+            sum += net_to_cpu_u16(temp2);
             if (sum > 0xffff)
                 sum -= 0xffff;
         }
