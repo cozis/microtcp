@@ -10,6 +10,8 @@
 #define TCP_DEBUG_LOG(...)
 #endif
 
+#define SEGMENT_OFFSET(seg) (cpu_is_little_endian() ? (seg)->offset2 : (seg)->offset1)
+
 void tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks)
 {
     tcp_state->ip = ip;
@@ -134,7 +136,7 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
         }
     }
 
-    return cpu_to_net_u32(~sum);
+    return cpu_to_net_u16(~sum);
 }
 
 static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_t payload)
@@ -158,15 +160,16 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
     //if (payload_being_sent > 0)
     //    seq_no++;
 
+    int offset = 5; // No options
     tcp_segment_t header = {
         .src_port = cpu_to_net_u16(listener->port),
         .dst_port = cpu_to_net_u16(connection->peer_port),
         .flags    = flags,
         .seq_no   = cpu_to_net_u32(seq_no),
         .ack_no   = cpu_to_net_u32(ack_no),
-        .offset   = 5, // No options
-        .unused   = 0,
-        .window   = cpu_to_net_u32(connection->rcv_wnd),
+        .offset1  = cpu_is_little_endian() ? 0 : offset,
+        .offset2  = cpu_is_little_endian() ? offset : 0,
+        .window   = cpu_to_net_u16(connection->rcv_wnd), // Why is a 32 bit integer being backed into a 16 bit?
         .checksum = 0, // Will be calculated later
         .urgent_pointer = 0,
     };
@@ -176,7 +179,7 @@ static void emit_segment(tcp_connection_t *connection, bool ack, bool syn, size_
         .dst_addr = connection->peer_ip,
         .reserved = 0,
         .protocol = 6, // TCP
-        .tcp_length = cpu_to_net_u32(total_segment_size),
+        .tcp_length = cpu_to_net_u16(total_segment_size),
     };
 
     header.checksum = calculate_checksum((slice_list_t[]) {
@@ -250,7 +253,17 @@ find_connection_associated_to_listener(tcp_listener_t *listener,
             connection = connection->next;
         }
     }
-
+    if (connection) {
+        // established=true
+    } else {
+        // established=false
+        connection = listener->non_established_list;
+        while (connection) {
+            if (connection->peer_port == peer_port && connection->peer_ip == peer_ip)
+                break;
+            connection = connection->next;
+        }
+    }
     return connection;
 }
 
@@ -286,7 +299,7 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
     TCP_DEBUG_LOG("Received TCP segment");
 
     assert(len >= sizeof(tcp_segment_t));
-    size_t data_offset = segment->offset * sizeof(uint32_t); // Length (in bytes) of the TCP header,
+    size_t data_offset = SEGMENT_OFFSET(segment) * sizeof(uint32_t); // Length (in bytes) of the TCP header,
                                                              // comprehensive of options.
 
     size_t options_len = data_offset - sizeof(tcp_segment_t); // The number of bytes of the options is

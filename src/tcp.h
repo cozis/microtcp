@@ -21,19 +21,15 @@ typedef struct {
     uint16_t dst_port;
     uint32_t seq_no;
     uint32_t ack_no;
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    uint8_t unused: 4;
-    uint8_t offset: 4;
-#else
-    uint8_t offset: 4;
-    uint8_t unused: 4;
-#endif
+    uint8_t offset1: 4; // When CPU is big endian
+    uint8_t offset2: 4; // When CPU is little endian
     uint8_t  flags;
     uint16_t window;
     uint16_t checksum;
     uint16_t urgent_pointer;
     char payload[];
 } tcp_segment_t;
+static_assert(sizeof(tcp_segment_t) == 20);
 
 typedef struct tcp_connection_t tcp_connection_t;
 typedef struct tcp_listener_t tcp_listener_t;

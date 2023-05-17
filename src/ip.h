@@ -7,13 +7,8 @@
 #define IP_PLUGGED_PROTOCOLS_MAX 4
 
 typedef struct {
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-    uint8_t  header_length: 4;
-    uint8_t  version: 4;
-#else
-    uint8_t  version: 4;
-    uint8_t  header_length: 4;
-#endif
+    uint8_t header_length_or_version1: 4; // Header length when little endian
+    uint8_t header_length_or_version2: 4; // Header length when big endian
     uint8_t  type_of_service;
     uint16_t total_length;
     uint16_t id;

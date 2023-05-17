@@ -1,7 +1,6 @@
-#include <stdbool.h>
 #include "endian.h"
 
-static bool cpu_is_little_endian(void)
+bool cpu_is_little_endian(void)
 {
     uint16_t x = 1;
     return *((uint8_t*) &x);

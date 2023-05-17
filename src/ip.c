@@ -70,8 +70,16 @@ static void send_icmp_packet(void *data, ip_address_t ip, size_t len)
 
     // The data was written in the output buffer
     ip_packet_t *packet = ip_state->output_ptr; // This changes every iteration
-    packet->version = 4;
-    packet->header_length = 5;
+
+    int version = 4;
+    int header_length = 5;
+    if (cpu_is_little_endian()) {
+        packet->header_length_or_version1 = header_length;
+        packet->header_length_or_version2 = version;
+    } else {
+        packet->header_length_or_version1 = version;
+        packet->header_length_or_version2 = header_length;
+    }
     packet->type_of_service = 0; // ???
     packet->total_length = cpu_to_net_u16(sizeof(ip_packet_t) + len);
     packet->id = ip_state->next_id++;
@@ -82,7 +90,7 @@ static void send_icmp_packet(void *data, ip_address_t ip, size_t len)
     packet->src_ip = ip_state->ip;
     packet->dst_ip = ip;
 
-    packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * packet->header_length);
+    packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * header_length);
 
     ip_state->send(ip_state->send_data, ip, sizeof(ip_packet_t) + len);
 }
@@ -163,8 +171,16 @@ int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst,
         size_t considered_payload = MIN(current_payload_limit, remaining_payload);
 
         ip_packet_t *packet = state->output_ptr; // This changes every iteration
-        packet->version = 4;
-        packet->header_length = 5;
+        
+        int version = 4;
+        int header_length = 5;
+        if (cpu_is_little_endian()) {
+            packet->header_length_or_version1 = header_length;
+            packet->header_length_or_version2 = version;
+        } else {
+            packet->header_length_or_version1 = version;
+            packet->header_length_or_version2 = header_length;
+        }
         packet->type_of_service = 0; // ???
         packet->total_length = cpu_to_net_u16(sizeof(ip_packet_t) + considered_payload);
         packet->id = state->next_id++;
@@ -184,7 +200,7 @@ int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst,
             copied_slices++;
         }
 
-        packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * packet->header_length);
+        packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * header_length);
 
         // Sending updates the [state->output_ptr] and [state->output_len]
         state->send(state->send_data, dst, sizeof(ip_packet_t) + considered_payload);
@@ -202,12 +218,23 @@ void ip_process_packet(ip_state_t *ip_state, const void *packet, size_t len)
 
     const ip_packet_t *packet2 = packet;
 
-    if (packet2->version != 4 || packet2->header_length < 5) {
-        IP_DEBUG_LOG("Only supported IPv4 (received %d) with no options", packet2->version);
+    int version;
+    int header_length;
+
+    if (cpu_is_little_endian()) {
+        header_length = packet2->header_length_or_version1;
+        version       = packet2->header_length_or_version2;
+    } else {
+        version       = packet2->header_length_or_version1;
+        header_length = packet2->header_length_or_version2;
+    }
+
+    if (version != 4 || header_length < 5) {
+        IP_DEBUG_LOG("Only supported IPv4 (received %d) with no options", version);
         return;
     }
 
-    size_t option_count = packet2->header_length - sizeof(ip_packet_t)/4;
+    size_t option_count = header_length - sizeof(ip_packet_t)/4;
     if (option_count > 0) {
         #warning "TODO: Handle IP options"
         return;
@@ -218,7 +245,7 @@ void ip_process_packet(ip_state_t *ip_state, const void *packet, size_t len)
         return;
     }
 
-    if (calculate_checksum_ip((uint16_t*) packet2, 4 * packet2->header_length)) {
+    if (calculate_checksum_ip((uint16_t*) packet2, 4 * header_length)) {
         IP_DEBUG_LOG("Dropping IP packet with invalid checksum");
         return;
     }
