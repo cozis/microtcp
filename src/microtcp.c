@@ -1132,6 +1132,8 @@ microtcp_mux_t *microtcp_mux_create(microtcp_t *mtcp)
     return mux;
 }
 
+static bool mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev);
+
 void microtcp_mux_destroy(microtcp_mux_t *mux)
 {
     // Unregister all idle sockets
@@ -1144,7 +1146,7 @@ void microtcp_mux_destroy(microtcp_mux_t *mux)
     // Consume all previously reported events
     // to make sure that when unregistering
     // the entries are actually removed
-    while (microtcp_mux_poll(mux, NULL));
+    while (mux_poll(mux, NULL));
 
     // Unreagister all sockets that have events
     while (mux->ready_queue_head) {
@@ -1181,6 +1183,8 @@ move_mux_entry_to_free_list(mux_entry_t *entry)
     microtcp_mux_t *mux = entry->mux;
     
     // If the entry is in a list, unlink it
+    if (mux->ready_queue_tail == entry)
+        mux->ready_queue_tail = entry->mux_next;
     if (entry->mux_prev) 
         *entry->mux_prev = entry->mux_next;
     if (entry->sock_prev)
@@ -1197,6 +1201,8 @@ move_mux_entry_to_free_list(mux_entry_t *entry)
 static void 
 move_mux_entry_to_idle_list(mux_entry_t *entry)
 {
+    microtcp_mux_t *mux = entry->mux;
+
     // To be moved to the idle list the entry
     // must be associated to a socket so it
     // must be in a socket mux list, therefore
@@ -1205,11 +1211,12 @@ move_mux_entry_to_idle_list(mux_entry_t *entry)
 
     // Make sure the entry is unlinked relative
     // to the lists in the mux
+    if (mux->ready_queue_tail == entry)
+        mux->ready_queue_tail = entry->mux_next;
     if (entry->mux_prev)
         *entry->mux_prev = entry->mux_next;
 
     // Now actually insert it into the idle list
-    microtcp_mux_t *mux = entry->mux;
     entry->mux_prev = &mux->idle_list;
     entry->mux_next = mux->idle_list;
     if (mux->idle_list)
@@ -1286,15 +1293,17 @@ bool microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int eve
 
         // Push it into the idle list of the mux
         entry->mux_prev = &mux->idle_list;
-        entry->mux_next = mux->idle_list;
+        entry->mux_next =  mux->idle_list;
         if (mux->idle_list)
             mux->idle_list->mux_prev = &entry->mux_next;
+        mux->idle_list = entry;
 
         // Push it into the socket mux list
         entry->sock_prev = &sock->mux_list;
-        entry->sock_next = sock->mux_list;
+        entry->sock_next =  sock->mux_list;
         if (sock->mux_list)
             sock->mux_list->sock_prev = &entry->sock_next;
+        sock->mux_list = entry;
 
         // Initialize the entry
         entry->sock = sock;
@@ -1312,17 +1321,14 @@ bool microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int eve
     return true;
 }
 
-bool microtcp_mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
+static bool mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
 {
-    LOCK_WHEN_THREADED(mux->mtcp);
+    
+    if (!mux->ready_queue_head)
+        return false; // No events occurred
 
     // Get the tail of the queue (without popping it)
-    mux_entry_t *entry = mux->ready_queue_tail;
-    
-    if (!entry) {
-        UNLOCK_WHEN_THREADED(mux->mtcp);
-        return false; // No events occurred
-    }
+    mux_entry_t *entry = mux->ready_queue_head;
 
     // If this socket was in the ready queue
     // it must have triggered events
@@ -1347,7 +1353,6 @@ bool microtcp_mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
         // we put the entry into the idle list
         move_mux_entry_to_idle_list(entry);
 
-    UNLOCK_WHEN_THREADED(mux->mtcp);
     return true;
 }
 
@@ -1355,13 +1360,16 @@ bool microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
 {
 #ifdef MICROTCP_BACKGROUND_THREAD
     LOCK_WHEN_THREADED(mux->mtcp);
-    while (!microtcp_mux_poll(mux, ev))
+    while (!mux_poll(mux, ev)) {
+        MICROTCP_DEBUG_LOG("Multiplexer waiting for an event");
         if (cnd_wait(&mux->queue_not_empty, &mux->mtcp->lock) != thrd_success)
             abort();
+        MICROTCP_DEBUG_LOG("Multiplexer woke up for an event");
+    }
     UNLOCK_WHEN_THREADED(mux->mtcp);
     return true;
 #else
-    return microtcp_mux_poll(mux, ev);
+    return mux_poll(mux, ev);
 #endif
 }
 
@@ -1372,45 +1380,58 @@ signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int event
 
     assert(events); // If no events need to be signaled then
                     // this function has no reason to be called.
+    
+    MICROTCP_DEBUG_LOG("Socket about to signal to multiplexers");
 
     mux_entry_t *entry = socket->mux_list;
     while (entry) {
         
         microtcp_mux_t *mux = entry->mux;
 
-        bool first_event_of_socket = (entry->triggered_events == 0);
-        entry->triggered_events |= events & entry->events_of_interest;
+        // Mask the bitmask of triggered events [events] with
+        // the bitmask of events that this multiplexer is
+        // interested in.
+        int newly_triggered_events = events & entry->events_of_interest;
         
-        if (first_event_of_socket) {
+        // If there are no previously triggered events by this
+        // socket and the socket just generated some events the
+        // mux is interested in, then we need to move the socket-mux
+        // structure from the idle list to the ready queue of the mux.        
+        bool first_event_of_socket_in_mux = (entry->triggered_events == 0) && newly_triggered_events;
+        entry->triggered_events |= newly_triggered_events;
 
+        if (first_event_of_socket_in_mux) {
+
+            // Is this the first socket structure of the muxes
+            // ready queue? If it is, we'll need to wake it up
             bool queue_was_empty = (mux->ready_queue_head == NULL);
 
-            // No entries were already triggered so
-            // it's necessary to move the entry from
-            // the mux's idle list to ready queue
-
-            // Unlink it from the idle queue
+            // Unlink it from the idle list
             *entry->mux_prev = entry->mux_next;
             if (entry->mux_next)
                 entry->mux_next->mux_prev = entry->mux_prev;
 
             // Add it to the queue
-            entry->mux_prev = &mux->ready_queue_head;
-            entry->mux_next =  mux->ready_queue_head;
-            if (mux->ready_queue_head)
-                mux->ready_queue_head->mux_prev = &entry->mux_next;
-            else
-                mux->ready_queue_tail = entry;
-            mux->ready_queue_head = entry;
+            if (mux->ready_queue_tail)
+                entry->mux_prev = &mux->ready_queue_tail->mux_next;
+            else {
+                entry->mux_prev = &mux->ready_queue_head;
+                mux->ready_queue_head = entry;
+            }
+            entry->mux_next = NULL;
+            mux->ready_queue_tail = entry;
 
 #ifdef MICROTCP_BACKGROUND_THREAD
+            MICROTCP_DEBUG_LOG("Signaling event to multiplexer");
             if (queue_was_empty)
                 cnd_signal(&mux->queue_not_empty);
+            MICROTCP_DEBUG_LOG("Signaled event to multiplexer");
 #else
             (void) queue_was_empty;
 #endif
         }
         entry = entry->sock_next;
     }
+    MICROTCP_DEBUG_LOG("Socket signaled to multiplexers");
 }
 #endif

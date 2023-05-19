@@ -48,7 +48,7 @@ MEMDBG=valgrind
 LIBDIR = 3p/lib
 INCDIR = 3p/include
 
-CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Iinclude/ -Wall -Wextra -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_BACKGROUND_THREAD -DMICROTCP_USING_TAP -DMICROTCP_USING_MUX
+CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Ibuild/ -Wall -Wextra -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_BACKGROUND_THREAD -DMICROTCP_USING_TAP -DMICROTCP_USING_MUX
 LFLAGS = -ltuntap $(LFLAGS_PLATFORM) -L$(LIBDIR)
 
 ifeq ($(MEMDBG),drmemory)
@@ -91,11 +91,11 @@ build/echo_tcp: examples/echo_tcp.c $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p
 	mkdir -p $(@D)
 	gcc build/microtcp.c examples/echo_tcp.c -o $@ $(CFLAGS) $(LFLAGS)
 
-build/microtcp.h: include/microtcp.h
+build/microtcp.h: src/microtcp.h
 	mkdir -p $(@D)
 	[ ! -e $@ ] || rm $@
 	echo "#define MICROTCP_AMALGAMATION" >> $@
-	cat include/microtcp.h >> $@
+	cat src/microtcp.h >> $@
 
 build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*.c src/*.h)
 	mkdir -p $(@D)

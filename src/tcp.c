@@ -311,7 +311,7 @@ move_from_non_established_list_to_non_accepted_queue(tcp_connection_t *connectio
 void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
                          tcp_segment_t *segment, size_t len)
 {
-    TCP_DEBUG_LOG("Received TCP segment");
+//    TCP_DEBUG_LOG("Received TCP segment");
 
     assert(len >= sizeof(tcp_segment_t));
     size_t data_offset = SEGMENT_OFFSET(segment) * sizeof(uint32_t); // Length (in bytes) of the TCP header,
@@ -320,6 +320,8 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
     size_t options_len = data_offset - sizeof(tcp_segment_t); // The number of bytes of the options is
                                                               // the size of the whole header minus the
                                                               // size of the header without options.
+    (void) options_len;
+
     size_t payload_size = len - data_offset;
     void  *payload_addr = (uint8_t*) segment + data_offset; // The segment->payload doesn't refer to the
                                                             // first byte of the payload but to the first
