@@ -1,14 +1,17 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdalign.h>
-#include "endian.h"
-#include "tcp.h"
+
+#ifndef MICROTCP_AMALGAMATION
+#   include "endian.h"
+#   include "tcp.h"
+#endif
 
 #ifdef TCP_DEBUG
-#include <stdio.h>
-#define TCP_DEBUG_LOG(fmt, ...) fprintf(stderr, "TCP :: " fmt "\n", ## __VA_ARGS__)
+#   include <stdio.h>
+#   define TCP_DEBUG_LOG(fmt, ...) fprintf(stderr, "TCP :: " fmt "\n", ## __VA_ARGS__)
 #else
-#define TCP_DEBUG_LOG(...)
+#   define TCP_DEBUG_LOG(...)
 #endif
 
 #define SEGMENT_OFFSET(seg) (cpu_is_little_endian() ? (seg)->offset2 : (seg)->offset1)
@@ -532,6 +535,8 @@ tcp_listener_create(tcp_state_t *state, uint16_t port, void *callback_data,
 
 void tcp_listener_destroy(tcp_listener_t *listener)
 {
+    #warning "The previously accepted connections should't be closed with their listener.. I think"
+
     // TODO: Close all connections
 
     tcp_state_t *state = listener->state;

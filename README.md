@@ -45,3 +45,6 @@ int main(void)
 //       If you want to use this code, you probably want to
 //       add some checks!
 ```
+
+## Contributing
+The build result is a header and a .c obtained as an amalgamation of all the source files. Any header included in the source files must be guarded by a `#ifndef MICROTCP_AMALGAMATION`.

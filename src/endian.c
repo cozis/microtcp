@@ -1,4 +1,6 @@
+#ifndef MICROTCP_AMALGAMATION
 #include "endian.h"
+#endif
 
 bool cpu_is_little_endian(void)
 {

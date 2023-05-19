@@ -1,6 +1,9 @@
 #include <stddef.h>
 #include <stdint.h>
+
+#ifndef MICROTCP_AMALGAMATION
 #include "defs.h"
+#endif
 
 #define TCP_MAX_LISTENERS 32
 #define TCP_MAX_SOCKETS 1024
@@ -43,7 +46,6 @@ struct tcp_listener_t {
     tcp_connection_t *non_established_list;
     tcp_connection_t *non_accepted_queue_head;
     tcp_connection_t *non_accepted_queue_tail;
-
     void (*callback_ready_to_accept)(void*);
     void  *callback_data;
 };

@@ -4,18 +4,20 @@
 #include <string.h> // strerror()
 #include <stdint.h>
 #include <stdlib.h>
-#include "ip.h"
-#include "arp.h"
-#include "tcp.h"
-#include "endian.h"
-#include <microtcp.h>
+
+#ifndef MICROTCP_AMALGAMATION
+#   include "ip.h"
+#   include "arp.h"
+#   include "tcp.h"
+#   include "endian.h"
+#   include "microtcp.h"
+#   ifdef MICROTCP_BACKGROUND_THREAD
+#       include "tinycthread.h"
+#   endif
+#endif
 
 #ifdef MICROTCP_USING_TAP
 #include <tuntap.h>
-#endif
-
-#ifdef MICROTCP_BACKGROUND_THREAD
-#include "tinycthread.h"
 #endif
 
 #ifdef MICROTCP_DEBUG
@@ -31,6 +33,35 @@
 #else
 #define   LOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
 #define UNLOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
+#endif
+
+#ifdef MICROTCP_USING_MUX
+typedef struct mux_entry_t mux_entry_t;
+struct mux_entry_t {
+    mux_entry_t **mux_prev;
+    mux_entry_t  *mux_next;
+    mux_entry_t **sock_prev;
+    mux_entry_t  *sock_next;
+    microtcp_mux_t *mux; // This is set on initialization
+                         // of the parent microtcp_mux_t
+                         // and never changed.
+    microtcp_socket_t *sock;
+    void *userp;
+    int triggered_events;
+    int events_of_interest;
+};
+
+struct microtcp_mux_t {
+    microtcp_t *mtcp;
+#ifdef MICROTCP_BACKGROUND_THREAD
+    cnd_t queue_not_empty;
+#endif
+    mux_entry_t *free_list;
+    mux_entry_t *idle_list;
+    mux_entry_t *ready_queue_head;
+    mux_entry_t *ready_queue_tail;
+    mux_entry_t entries[MICROTCP_MAX_MUX_ENTRIES];
+};
 #endif
 
 typedef struct buffer_t buffer_t;
@@ -56,6 +87,7 @@ struct microtcp_socket_t {
         tcp_listener_t   *listener;
         tcp_connection_t *connection;
     };
+
 #ifdef MICROTCP_BACKGROUND_THREAD
     union {
         cnd_t something_to_accept;
@@ -64,6 +96,10 @@ struct microtcp_socket_t {
             cnd_t something_to_send;
         };
     };
+#endif
+
+#ifdef MICROTCP_USING_MUX
+    mux_entry_t *mux_list;
 #endif
 };
 
@@ -105,6 +141,7 @@ const char *microtcp_strerror(microtcp_errcode_t errcode)
         case MICROTCP_ERRCODE_BADCONDVAR: return "Condition variable error";
         case MICROTCP_ERRCODE_NOTLISTENER: return "Invalid operation on a non-listener socket";
         case MICROTCP_ERRCODE_CANTBLOCK: return "Can't execute a blocking call for this function";
+        case MICROTCP_ERRCODE_WOULDBLOCK: return "Can't executa e non-blocking call for this function";
         case MICROTCP_ERRCODE_NOTCONNECTION: return "Invalid operation on a non-connection socket";
     }
     return "???";
@@ -367,7 +404,7 @@ void microtcp_step(microtcp_t *mtcp)
 
     // The call to [recv] (which is assumed to be blocking)
     // needs to be out of the critical section to give other
-    // threads the ability to progress in the mean time.        
+    // threads the ability to progress in the mean time.
     int size = mtcp->callbacks.recv(mtcp->callbacks.data, packet, sizeof(packet));
     if (size < 0)
         return;
@@ -671,9 +708,9 @@ bool microtcp_callbacks_create_for_tap(const char *ip, const char *mac,
 
     *callbacks = (microtcp_callbacks_t) {
         .data = dev,
-        .free = tuntap_release,
-        .recv = tuntap_read,
-        .send = tuntap_write,
+        .free = (void(*)(void*)) tuntap_release,
+        .recv = (int(*)(void*, void*, size_t)) tuntap_read,
+        .send = (int(*)(void*, const void*, size_t)) tuntap_write,
     };
     
     return true;
@@ -758,17 +795,26 @@ push_unlinked_socket_into_free_list(microtcp_t *mtcp, microtcp_socket_t *socket)
     mtcp->free_socket_list = socket;
 }
 
+#ifdef MICROTCP_USING_MUX
+static void
+signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int events);
+#endif
+
 static void ready_to_accept(void *data)
 {
-#ifdef MICROTCP_BACKGROUND_THREAD
     microtcp_socket_t *socket = data;
+    (void) socket;
+
+#ifdef MICROTCP_BACKGROUND_THREAD
     cnd_signal(&socket->something_to_accept);
-#else
-    (void) data;
+#endif
+
+#ifdef MICROTCP_USING_MUX
+    signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_ACCEPT);
 #endif
 }
 
-microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port, 
+microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
                                  microtcp_errcode_t *errcode)
 {
     microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
@@ -795,6 +841,10 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
         socket->type = SOCKET_LISTENER;
         socket->listener = listener;
 
+#ifdef MICROTCP_USING_MUX
+        socket->mux_list = NULL;
+#endif
+
 #ifdef MICROTCP_BACKGROUND_THREAD
         if (cnd_init(&socket->something_to_accept) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
@@ -818,6 +868,8 @@ void microtcp_close(microtcp_socket_t *socket)
         return;
 
     microtcp_t *mtcp = socket->mtcp;
+
+    #warning "sockets should unregister from all multiplexers"
 
     LOCK_WHEN_THREADED(mtcp);
     {
@@ -843,21 +895,29 @@ void microtcp_close(microtcp_socket_t *socket)
 
 static void ready_to_recv(void *data)
 {
-#ifdef MICROTCP_BACKGROUND_THREAD
     microtcp_socket_t *socket = data;
+    (void) socket;
+
+#ifdef MICROTCP_BACKGROUND_THREAD
     cnd_signal(&socket->something_to_recv);
-#else
-    (void) data;
+#endif
+
+#ifdef MICROTCP_USING_MUX
+    signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_RECV);
 #endif
 }
 
 static void ready_to_send(void *data)
 {
-#ifdef MICROTCP_BACKGROUND_THREAD
     microtcp_socket_t *socket = data;
+    (void) socket;
+
+#ifdef MICROTCP_BACKGROUND_THREAD
     cnd_signal(&socket->something_to_send);
-#else
-    (void) data;
+#endif
+
+#ifdef MICROTCP_USING_MUX
+    signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_SEND);
 #endif
 }
 
@@ -886,14 +946,20 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (!connection && !no_block) {
-            if (cnd_wait(&socket->something_to_accept, &mtcp->lock) != thrd_success)
-                abort();
+            if (cnd_wait(&socket->something_to_accept, &mtcp->lock) != thrd_success) {
+                errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
+                push_unlinked_socket_into_free_list(mtcp, socket2);
+                goto unlock_and_exit;
+            }
             connection = tcp_listener_accept(socket->listener, socket2, ready_to_recv, ready_to_send);
         }
 #else
-        if (!connection && !no_block) {
+        if (!connection) {
+            if (no_block)
+                errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
+            else
+                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
             push_unlinked_socket_into_free_list(mtcp, socket2);
-            errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
             goto unlock_and_exit;
         }
 #endif
@@ -903,6 +969,10 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
         socket2->next = NULL;
         socket2->type = SOCKET_CONNECTION;
         socket2->connection = connection;
+
+#ifdef MICROTCP_USING_MUX
+        socket2->mux_list = NULL;
+#endif
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         if (cnd_init(&socket2->something_to_recv) != thrd_success) {
@@ -953,13 +1023,18 @@ size_t microtcp_recv(microtcp_socket_t *socket,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (num == 0 && !no_block) {
-            if (cnd_wait(&socket->something_to_recv, &mtcp->lock) != thrd_success)
-                abort();
+            if (cnd_wait(&socket->something_to_recv, &mtcp->lock) != thrd_success) {
+                errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
+                goto unlock_and_exit;
+            }
             num = tcp_connection_recv(socket->connection, dst, len);
         }
 #else
-        if (num == 0 && !no_block) {
-            errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
+        if (num == 0) {
+            if (no_block)
+                errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
+            else
+                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
             goto unlock_and_exit;
         }
 #endif
@@ -994,18 +1069,348 @@ size_t microtcp_send(microtcp_socket_t *socket,
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (num == 0 && !no_block) {
-            if (cnd_wait(&socket->something_to_send, &mtcp->lock) != thrd_success)
-                abort();
+            if (cnd_wait(&socket->something_to_send, &mtcp->lock) != thrd_success) {
+                errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
+                goto unlock_and_exit;
+            }
             num = tcp_connection_send(socket->connection, src, len);
         }
 #else
-        if (num == 0 && !no_block)
-            errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
+        if (num == 0) {
+            if (no_block)
+                errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
+            else
+                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
+            goto unlock_and_exit;
+        }
 #endif
     }
+unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
 
     if (errcode)
         *errcode = errcode2;
     return num;
 }
+
+#ifdef MICROTCP_USING_MUX
+microtcp_mux_t *microtcp_mux_create(microtcp_t *mtcp)
+{
+    microtcp_mux_t *mux = malloc(sizeof(microtcp_mux_t));
+    if (!mux)
+        return NULL;
+
+    mux->mtcp = mtcp;
+
+    // Build the free list
+    static_assert(MICROTCP_MAX_MUX_ENTRIES > 1);
+    const int max = MICROTCP_MAX_MUX_ENTRIES;
+    for (int i = 1; i < max-1; i++) {
+        mux->entries[i].mux = mux; // This will be never changed
+        mux->entries[i].mux_prev = &mux->entries[i-1].mux_next;
+        mux->entries[i].mux_next = &mux->entries[i+1];
+    }
+    mux->entries[0].mux = mux; // Never changed
+    mux->entries[0].mux_prev = &mux->free_list;
+    mux->entries[0].mux_next = &mux->entries[1];
+    mux->entries[max-1].mux = mux; // Never changed
+    mux->entries[max-1].mux_prev = &mux->entries[max-2].mux_next;
+    mux->entries[max-1].mux_next = NULL;
+
+    mux->idle_list = NULL;
+    mux->free_list = mux->entries;
+    mux->ready_queue_head = NULL;
+    mux->ready_queue_tail = NULL;
+
+#ifdef MICROTCP_BACKGROUND_THREAD
+    if (cnd_init(&mux->queue_not_empty) != thrd_success) {
+        free(mux);
+        return NULL;
+    }
+#endif
+
+    return mux;
+}
+
+void microtcp_mux_destroy(microtcp_mux_t *mux)
+{
+    // Unregister all idle sockets
+    // Idle entries don't have pending events
+    // to deliver so by unregistering them the
+    // entry is unlinked.
+    while (mux->idle_list)
+        microtcp_mux_unregister(mux, mux->idle_list->sock, ~0);
+
+    // Consume all previously reported events
+    // to make sure that when unregistering
+    // the entries are actually removed
+    while (microtcp_mux_poll(mux, NULL));
+
+    // Unreagister all sockets that have events
+    while (mux->ready_queue_head) {
+        mux_entry_t *entry = mux->ready_queue_head;
+        microtcp_mux_unregister(mux, entry->sock, ~0);
+
+        // Since all events were consumed beforehand
+        // we're sure the entry was removed.
+        assert(entry != mux->ready_queue_head);
+    }
+
+#ifdef MICROTCP_BACKGROUND_THREAD
+    cnd_destroy(&mux->queue_not_empty);
+#endif
+
+    free(mux);
+}
+
+static mux_entry_t*
+find_socket_and_mux_entry(microtcp_mux_t *mux, microtcp_socket_t *sock)
+{
+    mux_entry_t *entry = sock->mux_list;
+    while (entry) {
+        if (entry->mux == mux)
+            break;
+        entry = entry->sock_next;
+    }
+    return entry;
+}
+
+static void 
+move_mux_entry_to_free_list(mux_entry_t *entry)
+{
+    microtcp_mux_t *mux = entry->mux;
+    
+    // If the entry is in a list, unlink it
+    if (entry->mux_prev) 
+        *entry->mux_prev = entry->mux_next;
+    if (entry->sock_prev)
+        *entry->sock_prev = entry->sock_next;
+
+    // Put the structure into the free list
+    entry->mux_prev = &mux->free_list;
+    entry->mux_next = mux->free_list;
+    if (mux->free_list)
+        mux->free_list->mux_prev = &entry->mux_next;
+    mux->free_list = entry;
+}
+
+static void 
+move_mux_entry_to_idle_list(mux_entry_t *entry)
+{
+    // To be moved to the idle list the entry
+    // must be associated to a socket so it
+    // must be in a socket mux list, therefore
+    // it must be true that
+    assert(entry->sock_prev); // not null iff the entry is in a mux list
+
+    // Make sure the entry is unlinked relative
+    // to the lists in the mux
+    if (entry->mux_prev)
+        *entry->mux_prev = entry->mux_next;
+
+    // Now actually insert it into the idle list
+    microtcp_mux_t *mux = entry->mux;
+    entry->mux_prev = &mux->idle_list;
+    entry->mux_next = mux->idle_list;
+    if (mux->idle_list)
+        mux->idle_list->mux_prev = &entry->mux_next;
+    mux->idle_list = entry;
+}
+
+bool microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int events)
+{
+    LOCK_WHEN_THREADED(mux->mtcp);
+
+    // There's no need to check that mux
+    // and socket have the same mtcp because
+    // if it's different it will result that
+    // the socket isn't registered into the
+    // mux. 
+
+    mux_entry_t *entry = find_socket_and_mux_entry(mux, sock);
+    if (!entry) {
+        // This socket wasn't registered into the mux
+        UNLOCK_WHEN_THREADED(mux->mtcp);
+        return false;
+    }
+
+    // Unset the events of interest
+    entry->events_of_interest &= ~events;
+    
+    if (entry->triggered_events) {
+        // NOTE: Since we modified "events_of_interest"
+        //       but not "triggered_events", any previously
+        //       triggered events that were now unregistered
+        //       will still be delivered to the user.
+        //
+        //       Though when events are delivered, if all 
+        //       events registered were all unregistered, 
+        //       the socket is removed from the mux.
+    } else
+        // No events were previously reported so we can
+        // move the entry to the free list.
+        move_mux_entry_to_free_list(entry);
+
+    UNLOCK_WHEN_THREADED(mux->mtcp);
+    return true;
+}
+
+bool microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int events, void *userp)
+{
+    LOCK_WHEN_THREADED(mux->mtcp);
+
+    if (mux->mtcp != sock->mtcp) {
+        UNLOCK_WHEN_THREADED(mux->mtcp);
+        return false; // mux and socket are associated to different microtcp stacks
+    }
+
+    if (events == 0) {
+        UNLOCK_WHEN_THREADED(mux->mtcp);
+        return true; // Nothing to be done
+    }
+
+    mux_entry_t *entry = find_socket_and_mux_entry(mux, sock);
+    if (!entry) {
+        // This is the first time that the socket is registered.
+        // Create an entry for it
+        if (mux->free_list == NULL) {
+            // The entry limit was reached. 
+            // It's impossible to register the socket at this time
+            UNLOCK_WHEN_THREADED(mux->mtcp);
+            return false;
+        }
+        
+        // Pop from the free list
+        entry = mux->free_list;
+        *entry->mux_prev = entry->mux_next;
+
+        // Push it into the idle list of the mux
+        entry->mux_prev = &mux->idle_list;
+        entry->mux_next = mux->idle_list;
+        if (mux->idle_list)
+            mux->idle_list->mux_prev = &entry->mux_next;
+
+        // Push it into the socket mux list
+        entry->sock_prev = &sock->mux_list;
+        entry->sock_next = sock->mux_list;
+        if (sock->mux_list)
+            sock->mux_list->sock_prev = &entry->sock_next;
+
+        // Initialize the entry
+        entry->sock = sock;
+        entry->userp = userp;
+        entry->triggered_events = 0;
+        entry->events_of_interest = 0;
+        // entry->mux = mux; This isn't necessary because the mux field
+        //                   is initialized once with the mux and never
+        //                   changed.
+    }
+
+    entry->events_of_interest |= events;
+
+    UNLOCK_WHEN_THREADED(mux->mtcp);
+    return true;
+}
+
+bool microtcp_mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
+{
+    LOCK_WHEN_THREADED(mux->mtcp);
+
+    // Get the tail of the queue (without popping it)
+    mux_entry_t *entry = mux->ready_queue_tail;
+    
+    if (!entry) {
+        UNLOCK_WHEN_THREADED(mux->mtcp);
+        return false; // No events occurred
+    }
+
+    // If this socket was in the ready queue
+    // it must have triggered events
+    assert(entry->triggered_events);
+
+    if (ev) {
+        ev->userp  = entry->userp;
+        ev->events = entry->triggered_events;
+        ev->socket = entry->sock;
+    }
+
+    // Unmark events as triggered
+    entry->triggered_events = 0;
+
+    if (entry->events_of_interest == 0)
+        // All events were unregistered. 
+        // We can remove the socket from the mux.
+        move_mux_entry_to_free_list(entry);
+    else
+        // The socket wasn't unregistered or
+        // wasn't unregistered completely so
+        // we put the entry into the idle list
+        move_mux_entry_to_idle_list(entry);
+
+    UNLOCK_WHEN_THREADED(mux->mtcp);
+    return true;
+}
+
+bool microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
+{
+#ifdef MICROTCP_BACKGROUND_THREAD
+    LOCK_WHEN_THREADED(mux->mtcp);
+    while (!microtcp_mux_poll(mux, ev))
+        if (cnd_wait(&mux->queue_not_empty, &mux->mtcp->lock) != thrd_success)
+            abort();
+    UNLOCK_WHEN_THREADED(mux->mtcp);
+    return true;
+#else
+    return microtcp_mux_poll(mux, ev);
+#endif
+}
+
+static void
+signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int events)
+{
+    // (This function is called by the socket and not the mux)
+
+    assert(events); // If no events need to be signaled then
+                    // this function has no reason to be called.
+
+    mux_entry_t *entry = socket->mux_list;
+    while (entry) {
+        
+        microtcp_mux_t *mux = entry->mux;
+
+        bool first_event_of_socket = (entry->triggered_events == 0);
+        entry->triggered_events |= events & entry->events_of_interest;
+        
+        if (first_event_of_socket) {
+
+            bool queue_was_empty = (mux->ready_queue_head == NULL);
+
+            // No entries were already triggered so
+            // it's necessary to move the entry from
+            // the mux's idle list to ready queue
+
+            // Unlink it from the idle queue
+            *entry->mux_prev = entry->mux_next;
+            if (entry->mux_next)
+                entry->mux_next->mux_prev = entry->mux_prev;
+
+            // Add it to the queue
+            entry->mux_prev = &mux->ready_queue_head;
+            entry->mux_next =  mux->ready_queue_head;
+            if (mux->ready_queue_head)
+                mux->ready_queue_head->mux_prev = &entry->mux_next;
+            else
+                mux->ready_queue_tail = entry;
+            mux->ready_queue_head = entry;
+
+#ifdef MICROTCP_BACKGROUND_THREAD
+            if (queue_was_empty)
+                cnd_signal(&mux->queue_not_empty);
+#else
+            (void) queue_was_empty;
+#endif
+        }
+        entry = entry->sock_next;
+    }
+}
+#endif

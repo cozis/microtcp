@@ -115,8 +115,11 @@ struct ethhdr {
 */
 
 #include <stdbool.h>
+
+#ifndef MICROTCP_AMALGAMATION
 #include "endian.h"
 #include "arp.h"
+#endif
 
 #ifdef ARP_DEBUG
 #include <stdio.h>

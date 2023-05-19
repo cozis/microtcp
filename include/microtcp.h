@@ -9,6 +9,7 @@ typedef struct microtcp_socket_t microtcp_socket_t;
 
 #define MICROTCP_MAX_BUFFERS 8
 #define MICROTCP_MAX_SOCKETS 32
+#define MICROTCP_MAX_MUX_ENTRIES 32
 
 typedef enum {
 
@@ -27,6 +28,9 @@ typedef enum {
 
     // Returned by microtcp_recv and microtcp_send
     MICROTCP_ERRCODE_NOTCONNECTION,
+
+    // Returned by microtcp_accept, microtcp_recv and microtcp_send
+    MICROTCP_ERRCODE_WOULDBLOCK,
 
 } microtcp_errcode_t;
 
@@ -52,3 +56,25 @@ size_t             microtcp_send(microtcp_socket_t *socket, const void *src, siz
 size_t             microtcp_recv(microtcp_socket_t *socket,       void *dst, size_t len, bool no_block, microtcp_errcode_t *errcode);
 void               microtcp_step(microtcp_t *mtcp);
 void               microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len);
+
+#ifdef MICROTCP_USING_MUX
+typedef enum {
+    MICROTCP_MUX_ACCEPT = 1,
+    MICROTCP_MUX_RECV   = 2,
+    MICROTCP_MUX_SEND   = 4,
+} microtcp_muxeventid_t;
+
+typedef struct {
+    void *userp;
+    int events;
+    microtcp_socket_t *socket;
+} microtcp_muxevent_t;
+
+typedef struct microtcp_mux_t microtcp_mux_t;
+microtcp_mux_t    *microtcp_mux_create(microtcp_t *mtcp);
+void               microtcp_mux_destroy(microtcp_mux_t *mux);
+bool               microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int events, void *userp);
+bool               microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int events);
+bool               microtcp_mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev);
+bool               microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev);
+#endif

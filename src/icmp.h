@@ -1,5 +1,8 @@
 #include <stddef.h>
+
+#ifndef MICROTCP_AMALGAMATION
 #include "defs.h"
+#endif
 
 typedef struct {
     void  *output_ptr;

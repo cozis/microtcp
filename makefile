@@ -45,10 +45,10 @@ endif
 # One of: drmemory, valgrind
 MEMDBG=valgrind
 
-LIBDIR = 3p/lib/
-INCDIR = 3p/include/
+LIBDIR = 3p/lib
+INCDIR = 3p/include
 
-CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Iinclude/ -Wall -Wextra -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_BACKGROUND_THREAD -DMICROTCP_USING_TAP
+CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Iinclude/ -Wall -Wextra -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_BACKGROUND_THREAD -DMICROTCP_USING_TAP -DMICROTCP_USING_MUX
 LFLAGS = -ltuntap $(LFLAGS_PLATFORM) -L$(LIBDIR)
 
 ifeq ($(MEMDBG),drmemory)
@@ -57,12 +57,9 @@ else
 	CFLAGS += -g
 endif
 
-INCDIR=3p/include
-LIBDIR=3p/lib
-
 .PHONY: all clean
 
-all: loop2
+all: build/microtcp.h build/microtcp.c build/echo_tcp build/echo_http
 
 3p/lib/libtuntap.a: 3p/libtuntap/build/lib/libtuntap.a
 	cp 3p/libtuntap/build/lib/libtuntap.a $(LIBDIR)
@@ -90,10 +87,55 @@ all: loop2
 3p/src/tinycthread.c: 3p/tinycthread/source/tinycthread.c
 	cp 3p/tinycthread/source/tinycthread.c 3p/src
 
-loop2: $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h 3p/src/tinycthread.c 3p/include/tinycthread.h
-	gcc src/endian.c src/arp.c src/ip.c src/icmp.c src/tcp.c src/microtcp.c test/loop2.c 3p/src/tinycthread.c -o loop2 $(CFLAGS) $(LFLAGS)
+build/echo_tcp: examples/echo_tcp.c $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h build/microtcp.c build/microtcp.h
+	mkdir -p $(@D)
+	gcc build/microtcp.c examples/echo_tcp.c -o $@ $(CFLAGS) $(LFLAGS)
+
+build/microtcp.h: include/microtcp.h
+	mkdir -p $(@D)
+	[ ! -e $@ ] || rm $@
+	echo "#define MICROTCP_AMALGAMATION" >> $@
+	cat include/microtcp.h >> $@
+
+build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*.c src/*.h)
+	mkdir -p $(@D)
+	[ ! -e $@ ] || rm $@
+	printf "#include \"microtcp.h\"\n" > $@
+	printf "#ifdef MICROTCP_BACKGROUND_THREAD" >> $@
+	printf "\n#line 1 \"3p/include/tinycthread.h\"\n" >> $@
+	cat 3p/include/tinycthread.h >> $@
+	printf "\n#line 1 \"3p/src/tinycthread.c\"\n" >> $@
+	cat 3p/src/tinycthread.c >> $@
+	printf "\n#endif /* MICROTCP_BACKGROUND_THREAD */" >> $@
+	printf "\n#line 1 \"src/defs.h\"\n" >> $@
+	cat src/defs.h >> $@
+	printf "\n#line 1 \"src/endian.h\"\n" >> $@
+	cat src/endian.h >> $@
+	printf "\n#line 1 \"src/arp.h\"\n" >> $@
+	cat src/arp.h    >> $@
+	printf "\n#line 1 \"src/icmp.h\"\n" >> $@
+	cat src/icmp.h   >> $@
+	printf "\n#line 1 \"src/ip.h\"\n" >> $@
+	cat src/ip.h     >> $@
+	printf "\n#line 1 \"src/tcp.h\"\n" >> $@
+	cat src/tcp.h    >> $@
+	printf "\n#line 1 \"src/endian.c\"\n" >> $@
+	cat src/endian.c >> $@
+	printf "\n#line 1 \"src/arp.c\"\n" >> $@
+	cat src/arp.c    >> $@
+	printf "\n#line 1 \"src/icmp.c\"\n" >> $@
+	cat src/icmp.c   >> $@
+	printf "\n#line 1 \"src/ip.c\"\n" >> $@
+	cat src/ip.c     >> $@
+	printf "\n#line 1 \"src/tcp.c\"\n" >> $@
+	cat src/tcp.c    >> $@
+	printf "\n#line 1 \"src/microtcp.c\"\n" >> $@
+	cat src/microtcp.c >> $@
+
+build/echo_http: $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h build/microtcp.h build/microtcp.c
+	gcc examples/microhttp/main.c examples/microhttp/xhttp.c build/microtcp.c -o $@ $(CFLAGS) $(LFLAGS)
 
 clean:
-	rm -f loop2 loop2.exe
+	rm -fr build
 	rm -fr 3p/libtuntap/build
 	rm -f 3p/lib/* 3p/include/*
