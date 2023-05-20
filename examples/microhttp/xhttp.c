@@ -135,6 +135,7 @@ struct conn_t {
 
 typedef struct {
     bool exiting;
+    microtcp_t *mtcp;
     microtcp_socket_t *sock;
     microtcp_mux_t *mux;
     int connum;
@@ -1416,6 +1417,7 @@ static const char *init(context_t *context, unsigned short port,
     microtcp_t *mtcp = microtcp_create_using_callbacks(config.ip, config.mac, callbacks);
     if (!mtcp)
         return "Failed to initialize TCP";
+    context->mtcp = mtcp;
 
     microtcp_errcode_t errcode;
 
@@ -1469,6 +1471,8 @@ const char *xhttp(unsigned short port, xh_callback callback,
 
     while(!context.exiting)
     {
+        microtcp_step(context.mtcp);
+
         microtcp_muxevent_t ev;
         if (!microtcp_mux_wait(context.mux, &ev))
             continue;
@@ -1492,7 +1496,7 @@ const char *xhttp(unsigned short port, xh_callback callback,
         if(ev.userp == NULL)
         {
 #ifdef DEBUG
-                fprintf(stderr, "XHTTP :: New connection\n");
+            fprintf(stderr, "XHTTP :: New connection\n");
 #endif
             // New connection.
             conn_t *newly_accepted = accept_connection(&context);
@@ -1559,6 +1563,7 @@ const char *xhttp(unsigned short port, xh_callback callback,
 
     (void) microtcp_close(context.sock);
     (void) microtcp_mux_destroy(context.mux);
+    microtcp_destroy(context.mtcp);
     return NULL;
 }
 

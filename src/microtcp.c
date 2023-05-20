@@ -249,6 +249,7 @@ static void mac_resolved(void *data, arp_resolution_status_t status, mac_address
             ethernet_frame_t *frame = (ethernet_frame_t*) buffer->data;
             frame->dst = mac;
 
+            MICROTCP_DEBUG_LOG("sending %d", buffer->used);
             int n = mtcp->callbacks.send(mtcp->callbacks.data, buffer->data, buffer->used);
             if (n < 0)
                 MICROTCP_DEBUG_LOG("Couldn't send (%s)", strerror(errno));

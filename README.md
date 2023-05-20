@@ -48,3 +48,7 @@ int main(void)
 
 ## Contributing
 The build result is a header and a .c obtained as an amalgamation of all the source files. Any header included in the source files must be guarded by a `#ifndef MICROTCP_AMALGAMATION`.
+
+## Functionalities
+MicroTCP will not support
+* TCP options

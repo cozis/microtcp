@@ -48,7 +48,7 @@ MEMDBG=valgrind
 LIBDIR = 3p/lib
 INCDIR = 3p/include
 
-CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Ibuild/ -Wall -Wextra -DDEBUG=1 -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_BACKGROUND_THREAD -DMICROTCP_USING_TAP -DMICROTCP_USING_MUX
+CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Ibuild/ -Wall -Wextra
 LFLAGS = -ltuntap $(LFLAGS_PLATFORM) -L$(LIBDIR)
 
 ifeq ($(MEMDBG),drmemory)
@@ -89,7 +89,7 @@ all: build/microtcp.h build/microtcp.c build/echo_tcp build/echo_http
 
 build/echo_tcp: examples/echo_tcp.c $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h build/microtcp.c build/microtcp.h
 	mkdir -p $(@D)
-	gcc build/microtcp.c examples/echo_tcp.c -o $@ $(CFLAGS) $(LFLAGS)
+	gcc build/microtcp.c examples/echo_tcp.c -o $@ $(CFLAGS) $(LFLAGS) -DDEBUG=1 -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_BACKGROUND_THREAD -DMICROTCP_USING_TAP -DMICROTCP_USING_MUX
 
 build/microtcp.h: src/microtcp.h
 	mkdir -p $(@D)
@@ -132,8 +132,8 @@ build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*
 	printf "\n#line 1 \"src/microtcp.c\"\n" >> $@
 	cat src/microtcp.c >> $@
 
-build/echo_http: $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h build/microtcp.h build/microtcp.c
-	gcc examples/microhttp/main.c examples/microhttp/xhttp.c build/microtcp.c -o $@ $(CFLAGS) $(LFLAGS)
+build/echo_http: examples/microhttp/main.c $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h build/microtcp.h build/microtcp.c
+	gcc examples/microhttp/main.c examples/microhttp/xhttp.c build/microtcp.c -o $@ $(CFLAGS) $(LFLAGS) -DDEBUG=1 -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_USING_MUX
 
 clean:
 	rm -fr build

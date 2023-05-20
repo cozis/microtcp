@@ -55,7 +55,7 @@ int main(void)
         return -1;
     }
 
-    tuntap_set_ip(dev, ip, netmask);
+    tuntap_set_ip(dev, "10.0.0.5", netmask);
     tuntap_set_hwaddr(dev, mac);
 
     if (tuntap_up(dev)) {

@@ -76,6 +76,27 @@ struct tcp_connection_t {
     ip_address_t peer_ip; // Network byte order
     uint16_t     peer_port; // CPU byte order
 
+    // Send Sequence Space
+    //
+    //               1         2          3          4      
+    //          ----------|----------|----------|---------- 
+    //                 SND.UNA    SND.NXT    SND.UNA        
+    //                                      +SND.WND        
+    //
+    //    1 - old sequence numbers which have been acknowledged  
+    //    2 - sequence numbers of unacknowledged data            
+    //    3 - sequence numbers allowed for new data transmission 
+    //    4 - future sequence numbers which are not yet allowed  
+    //
+    // Receive Sequence Space
+    //
+    //                   1          2          3      
+    //               ----------|----------|---------- 
+    //                      RCV.NXT    RCV.NXT        
+    //                                +RCV.WND        
+    //
+    // (From RFC 793 section 3.2, // https://www.ietf.org/rfc/rfc793.txt)
+    
     uint32_t rcv_unread; // It's the sequence number of the first
                          // byte stored in the input buffer, such
                          // that [rcv_next - rcv_unread] is the
