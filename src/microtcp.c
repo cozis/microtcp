@@ -810,6 +810,7 @@ static void ready_to_accept(void *data)
 #endif
 
 #ifdef MICROTCP_USING_MUX
+    MICROTCP_DEBUG_LOG("Signaling ACCEPT to muxes");
     signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_ACCEPT);
 #endif
 }
@@ -903,6 +904,7 @@ static void ready_to_recv(void *data)
 #endif
 
 #ifdef MICROTCP_USING_MUX
+    MICROTCP_DEBUG_LOG("Signaling RECV to muxes");
     signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_RECV);
 #endif
 }
@@ -917,6 +919,7 @@ static void ready_to_send(void *data)
 #endif
 
 #ifdef MICROTCP_USING_MUX
+    MICROTCP_DEBUG_LOG("Signaling SEND to muxes");
     signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_SEND);
 #endif
 }
@@ -978,14 +981,12 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
         if (cnd_init(&socket2->something_to_recv) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
             push_unlinked_socket_into_free_list(mtcp, socket2);
-            tcp_connection_destroy(connection);
             goto unlock_and_exit;
         }
         if (cnd_init(&socket2->something_to_send) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
             cnd_destroy(&socket2->something_to_recv);
             push_unlinked_socket_into_free_list(mtcp, socket2);
-            tcp_connection_destroy(connection);
             goto unlock_and_exit;
         }
 #endif
@@ -1029,15 +1030,13 @@ size_t microtcp_recv(microtcp_socket_t *socket,
             }
             num = tcp_connection_recv(socket->connection, dst, len);
         }
-#else
+#endif
         if (num == 0) {
             if (no_block)
                 errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
             else
                 errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-            goto unlock_and_exit;
         }
-#endif
     }
 unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
@@ -1075,15 +1074,13 @@ size_t microtcp_send(microtcp_socket_t *socket,
             }
             num = tcp_connection_send(socket->connection, src, len);
         }
-#else
+#endif
         if (num == 0) {
             if (no_block)
                 errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
             else
                 errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-            goto unlock_and_exit;
         }
-#endif
     }
 unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
@@ -1393,6 +1390,9 @@ signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int event
         // interested in.
         int newly_triggered_events = events & entry->events_of_interest;
         
+        if (!newly_triggered_events)
+            MICROTCP_DEBUG_LOG("MUX not interested in these events");
+
         // If there are no previously triggered events by this
         // socket and the socket just generated some events the
         // mux is interested in, then we need to move the socket-mux

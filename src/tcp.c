@@ -238,6 +238,8 @@ static void handle_received_data(tcp_connection_t *connection,
 
         emit_segment(connection, true, false, SIZE_MAX);
 
+        TCP_DEBUG_LOG("Received %d bytes", considered);
+
         // Data is ready to be received by the parent application
         if (connection->callback_ready_to_recv)
             connection->callback_ready_to_recv(connection->callback_data);
@@ -340,6 +342,9 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
 
     tcp_connection_t *connection = find_connection_associated_to_listener(listener, sender, reordered_src_port);
     if (!connection) {
+
+        TCP_DEBUG_LOG("Connection request from port %d", reordered_src_port);
+
         // Something sent to an open listener. 
 
         // We expect it to be a request to connect,
@@ -606,7 +611,7 @@ tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_d
     connection->callback_data = callback_data;
     connection->callback_ready_to_recv = callback_ready_to_recv;
     connection->callback_ready_to_send = callback_ready_to_send;
-
+    
     return connection;
 }
 

@@ -509,19 +509,19 @@ static void req_deinit(xh_request *req)
     req->headers.count = 0;
 }
 
-static void accept_connection(context_t *ctx)
+static conn_t *accept_connection(context_t *ctx)
 {
     microtcp_errcode_t errcode;
     microtcp_socket_t *accepted_sock = microtcp_accept(ctx->sock, true, &errcode);
 
     if(accepted_sock == NULL)
-        return; // Failed to accept.
+        return NULL; // Failed to accept.
 
     if(ctx->freelist == NULL)
     {
         // Connection limit reached.
         microtcp_close(accepted_sock);
-        return;
+        return NULL;
     }
 
     conn_t *conn = ctx->freelist;
@@ -534,17 +534,18 @@ static void accept_connection(context_t *ctx)
     conn->sock = accepted_sock;
     req_init(&conn->request);
 
-    if(microtcp_mux_register(ctx->mux, accepted_sock, MICROTCP_MUX_RECV|MICROTCP_MUX_SEND, conn))
+    if(!microtcp_mux_register(ctx->mux, accepted_sock, MICROTCP_MUX_RECV|MICROTCP_MUX_SEND, conn))
     {
         microtcp_close(accepted_sock);
 
         conn->sock = NULL;
         conn->next = ctx->freelist;
         ctx->freelist = conn;
-        return;
+        return NULL;
     }
 
     ctx->connum += 1;
+    return conn;
 }
 
 static void close_connection(context_t *ctx, conn_t *conn)
@@ -960,6 +961,9 @@ static bool upload(conn_t *conn)
                     break;
 
                 // ERROR!
+#ifdef DEBUG
+                fprintf(stderr, "XHTTP :: microtcp_send failed (%s)\n", microtcp_strerror(errcode));
+#endif
                 return 0;
             }
 
@@ -1251,7 +1255,7 @@ static void when_data_is_ready_to_be_read(context_t *ctx, conn_t *conn)
 
             microtcp_errcode_t errcode;
             size_t n = microtcp_recv(conn->sock, b->data + b->used, b->size - b->used, true, &errcode);
-
+            
             if(n == 0)
             {
                 // Peer disconnected or an error occurred
@@ -1260,6 +1264,9 @@ static void when_data_is_ready_to_be_read(context_t *ctx, conn_t *conn)
                     break; // Done downloading.
                 if (errcode != MICROTCP_ERRCODE_NONE)
                 {
+#ifdef DEBUG
+                    fprintf(stderr, "XHTTP :: %s\n", microtcp_strerror(errcode));
+#endif
                     // An error occurred.
                     close_connection(ctx, conn);
                     return;
@@ -1466,11 +1473,40 @@ const char *xhttp(unsigned short port, xh_callback callback,
         if (!microtcp_mux_wait(context.mux, &ev))
             continue;
 
+#ifdef DEBUG
+        const char *event_bitset_string;
+        switch (ev.events) {
+            case 0: event_bitset_string = ""; break;
+            case MICROTCP_MUX_RECV: event_bitset_string = "RECV"; break;
+            case MICROTCP_MUX_SEND: event_bitset_string = "SEND"; break;
+            case MICROTCP_MUX_ACCEPT: event_bitset_string = "ACCEPT"; break;
+            case MICROTCP_MUX_RECV | MICROTCP_MUX_SEND: event_bitset_string = "RECV|SEND"; break;
+            case MICROTCP_MUX_RECV | MICROTCP_MUX_ACCEPT: event_bitset_string = "RECV|ACCEPT"; break;
+            case MICROTCP_MUX_SEND | MICROTCP_MUX_ACCEPT: event_bitset_string = "SEND|ACCEPT"; break;
+            case MICROTCP_MUX_RECV | MICROTCP_MUX_SEND | MICROTCP_MUX_ACCEPT: event_bitset_string = "RECV|SEND|ACCEPT"; break;
+            default: event_bitset_string = "???";
+        }
+        fprintf(stderr, "XHTTP :: Event %s\n", event_bitset_string);
+#endif
+
         if(ev.userp == NULL)
         {
+#ifdef DEBUG
+                fprintf(stderr, "XHTTP :: New connection\n");
+#endif
             // New connection.
-            accept_connection(&context);
-            continue;
+            conn_t *newly_accepted = accept_connection(&context);
+            if (!newly_accepted)
+                continue; // For some reason, although a MICROTCP_MUX_ACCEPT
+                          // was received by the MUX, accepting failed.
+                          // Wait for the next event.
+
+            // A connection was accepted. Since it may already
+            // contain data to be read or space to write we continue
+            // by building a fake event ourselves
+            ev.userp = newly_accepted;
+            ev.events = MICROTCP_MUX_RECV | MICROTCP_MUX_SEND;
+            ev.socket = newly_accepted->sock;
         }
 
         conn_t *conn = ev.userp;

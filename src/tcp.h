@@ -107,7 +107,7 @@ struct tcp_connection_t {
                       // byte sent and acknowledged by the peer.
 
     char out_buffer[TCP_OUTPUT_BUFFER_SIZE];
-    char in_buffer[TCP_INPUT_BUFFER_SIZE];
+    char  in_buffer[TCP_INPUT_BUFFER_SIZE];
 };
 
 typedef struct {
