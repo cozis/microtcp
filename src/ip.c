@@ -206,7 +206,6 @@ int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst,
         packet->checksum = calculate_checksum_ip((uint16_t*) packet, 4 * header_length);
 
         // Sending updates the [state->output_ptr] and [state->output_len]
-        IP_DEBUG_LOG("sending %d", sizeof(ip_packet_t) + considered_payload);
         state->send(state->send_data, dst, sizeof(ip_packet_t) + considered_payload);
 
         managed_payload += considered_payload;

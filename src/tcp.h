@@ -60,6 +60,7 @@ typedef enum {
     TCP_STATE_CLOSE_WAIT,
     TCP_STATE_LAST_ACK,
     TCP_STATE_TIME_WAIT,
+    TCP_STATE_CLOSING,
 } tcp_connstate_t;
 
 struct tcp_connection_t {

@@ -201,7 +201,6 @@ static void emit_segment(tcp_connection_t *connection, uint8_t flags, size_t pay
         {send_ptr, send_len},
     }, 3);
 
-    TCP_DEBUG_LOG("sending %d+%d=%d", sizeof(tcp_segment_t), send_len, sizeof(tcp_segment_t)+send_len);
     int result = state->callbacks.send(state->callbacks.data, connection->peer_ip, (slice_list_t[]) {
         {&header, sizeof(tcp_segment_t)},
         {send_ptr, send_len},
@@ -236,8 +235,6 @@ static void handle_received_data(tcp_connection_t *connection,
         connection->rcv_nxt += considered;
 
         emit_segment(connection, TCP_FLAG_ACK, SIZE_MAX);
-
-        TCP_DEBUG_LOG("Received %d bytes", considered);
 
         // Data is ready to be received by the parent application
         if (connection->callback_ready_to_recv)
@@ -307,6 +304,55 @@ move_from_non_established_list_to_non_accepted_queue(tcp_connection_t *connectio
     else
         listener->non_accepted_queue_tail = connection;
     listener->non_accepted_queue_head = connection;
+}
+
+static bool ack_until(tcp_connection_t *connection, uint32_t ack_no)
+{
+    // Set sent but unacknowledged bytes with sequence
+    // numbers up to [ack_no] as acknowledged. This [ack_no]
+    // comes from the network so it must be verified.
+    //
+    // If at least one byte was marked as acknowledged, then
+    // true is returned, else false.
+
+    if (ack_no <= connection->snd_una) {
+        TCP_DEBUG_LOG("Received segment acknowledged again %d", ack_no);
+        return false;
+    }
+
+    if (ack_no > connection->snd_nxt) {
+        // Peer ACKed unsent data. The right course of action
+        // is probably to drop the connection.
+        TCP_DEBUG_LOG("Received segment acknowledged unsent data "
+                      "with sequence number %d, but %d still wasn't sent", 
+                      ack_no, connection->snd_nxt);
+        return false; // For now we'll just ignore the segment.
+    }
+    
+    size_t newly_acked_bytes = ack_no - connection->snd_una;
+    memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
+    connection->snd_wnd -= newly_acked_bytes;
+    connection->snd_una = ack_no;
+
+    return true;
+}
+
+static void 
+really_close_connection(tcp_connection_t *connection)
+{
+    tcp_listener_t *listener = connection->listener;
+    tcp_state_t *state = listener->state;
+
+    // Pop connection from the accepted_list
+    if (connection->prev)
+        connection->prev->next = connection->next;
+    else
+        listener->accepted_list = connection->next;
+
+    // Push it into the free connection list
+    connection->prev = NULL;
+    connection->next = state->free_connection_list;
+    state->free_connection_list = connection;
 }
 
 void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
@@ -457,67 +503,106 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
             break;
 
             case TCP_STATE_ESTAB:
+
             if (segment->flags & TCP_FLAG_ACK) {
-
                 uint32_t ack_no = net_to_cpu_u32(segment->ack_no);
-
-                if (ack_no <= connection->snd_una)
-                    TCP_DEBUG_LOG("Received segment acknowledged again %d", ack_no);
-                else {
-                    if (ack_no > connection->snd_nxt) {
-                        // Peer ACKed unsent data. The right course of action
-                        // is probably to drop the connection.
-                        TCP_DEBUG_LOG("Received segment acknowledged unsent data "
-                                      "with sequence number %d, but %d still wasn't sent", 
-                                      ack_no, connection->snd_nxt);
-                        return; // For now we'll just ignore the segment.
-                    }
-                
-                    size_t newly_acked_bytes = ack_no - connection->snd_una;
-                    memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
-                    connection->snd_wnd -= newly_acked_bytes;
-                    connection->snd_una = ack_no;
-
-                    // Now there's space available in the output buffer
+                if (ack_until(connection, ack_no))
+                    // At least one byte was ACKed, so now there's space 
+                    // available in the output buffer
                     if (connection->callback_ready_to_send)
                         connection->callback_ready_to_send(connection->callback_data);
-                }
             }
 
             handle_received_data(connection, payload_addr, payload_size);
 
             if (segment->flags & TCP_FLAG_FIN) {
-                
-                // Send ACK for the FIN
+                // An unsolicited FIN was received. We ACK the FIN and
+                // set the connection state as waiting to be closed from
+                // this end.
+                TCP_DEBUG_LOG("ESTAB -> CLOSE_WAIT");
+                connection->rcv_nxt++; // FIN ghost byte
                 emit_segment(connection, TCP_FLAG_ACK, 0);
                 connection->state = TCP_STATE_CLOSE_WAIT;
             }
             break;
             
             case TCP_STATE_FIN_WAIT_1:
-            {
-                // The FIN segment was sent after the user called "close".
-                // In this state we're expecting the ACK flag for the fin.
-                // The same message could also contain the peer's FIN.
+            // The FIN segment was sent after the user called "close".
+            // In this state we're expecting the ACK flag for the fin.
+            // The same message could also contain the peer's FIN.
+
+            if (segment->flags & (TCP_FLAG_FIN | TCP_FLAG_ACK)) {
+
+                TCP_DEBUG_LOG("FIN-WAIT-1 -> TIME-WAIT");
+                connection->rcv_nxt++; // FIN ghost byte
+                emit_segment(connection, TCP_FLAG_ACK, 0);
+                connection->state = TCP_STATE_TIME_WAIT;
+
+            } else if (segment->flags & TCP_FLAG_ACK) {
+
+                TCP_DEBUG_LOG("FIN-WAIT-1 -> FIN-WAIT-2");
+                connection->state = TCP_STATE_FIN_WAIT_2;
+
+            } else if (segment->flags & TCP_FLAG_FIN) {
+
+                TCP_DEBUG_LOG("FIN-WAIT-1 -> CLOSING");
+                connection->rcv_nxt++; // FIN ghost byte
+                emit_segment(connection, TCP_FLAG_ACK, 0);
+                connection->state = TCP_STATE_CLOSING;
+                
+            } else {
+                // Expected FIN and/or ACK but didn't receive them
             }
             break;
 
-            case TCP_STATE_FIN_WAIT_2:break;
-            case TCP_STATE_CLOSE_WAIT:break;
-            case TCP_STATE_LAST_ACK:break;
-            case TCP_STATE_TIME_WAIT:
-            {
-                // Pop connection from the accepted_list
-                if (connection->prev)
-                    connection->prev->next = connection->next;
-                else
-                    listener->accepted_list = connection->next;
+            case TCP_STATE_FIN_WAIT_2:
+            // Socket was closed from the user so a FIN was sent.
+            // The FIN was ACKed and now we're waiting for their
+            // FIN to ACK. 
 
-                // Push it into the free connection list
-                connection->prev = NULL;
-                connection->next = state->free_connection_list;
-                state->free_connection_list = connection;
+            if (!(segment->flags & TCP_FLAG_FIN))
+                break; // Not a FIN segment so we ignore it.
+
+            connection->rcv_nxt++; // FIN ghost byte
+            emit_segment(connection, TCP_FLAG_ACK, 0);
+
+            connection->state = TCP_STATE_TIME_WAIT;
+            break;
+
+            case TCP_STATE_CLOSE_WAIT:
+            // Nothing to be done here!
+            //
+            // A FIN was received and ACKed. At this point we're
+            // waiting for the user to close the socket, so we
+            // can ignore any incoming segment.
+            break;
+            
+            case TCP_STATE_LAST_ACK:
+            {
+                // FIN was received, ACKed and a FIN was sent.
+                // Now we expect the final ACK for our FIN.
+                if (!(segment->flags & TCP_FLAG_ACK))
+                    break;
+
+                uint32_t ack_no = net_to_cpu_u32(segment->ack_no);
+                if (ack_until(connection, ack_no)) {
+                    // FIXME!
+                    // At least one byte was ACKed. There is not assurance
+                    // that it was the FIN, but it's good enough for now!
+                    connection->state = TCP_STATE_CLOSED;
+                    really_close_connection(connection);
+                }
             }
+            break;
+
+            case TCP_STATE_TIME_WAIT:
+            // Connection is cooling off. Ignore everything
+            break;
+
+            case TCP_STATE_CLOSING:
+            // FIN was sent and a FIN received. Now we expect 
+            // the ACK for our FIN.
+            // ..TODO..
             break;
         }
     }
@@ -670,11 +755,30 @@ void tcp_connection_destroy(tcp_connection_t *connection)
 
     // You can only call destroy on connections
     // that were at least established
-    assert(connection->state == TCP_STATE_ESTAB);
+    assert(connection->state == TCP_STATE_ESTAB || 
+           connection->state == TCP_STATE_CLOSE_WAIT);
 
-    // Send the FIN message
-    //emit_segment(connection, TCP_FLAG_FIN, 0);
-    //connection->state = TCP_STATE_FIN_WAIT_1;
+    switch (connection->state) {
+        
+        case TCP_STATE_ESTAB:
+        TCP_DEBUG_LOG("ESTAB -> FIN-WAIT-1");
+        emit_segment(connection, TCP_FLAG_FIN | TCP_FLAG_ACK, 0);
+        connection->snd_nxt++; // FIN ghost byte
+        connection->state = TCP_STATE_FIN_WAIT_1; 
+        break;
+    
+        case TCP_STATE_CLOSE_WAIT:
+        TCP_DEBUG_LOG("ESTAB -> LAST-ACK");
+        emit_segment(connection, TCP_FLAG_FIN | TCP_FLAG_ACK, 0);
+        connection->snd_nxt++; // FIN ghost byte
+        connection->state = TCP_STATE_LAST_ACK;
+        break;
+
+        default:
+        // This point should be unreachable
+        assert(0);
+        break;
+    }
 
     // TODO: Should start a timeout here prolly
 }
