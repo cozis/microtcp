@@ -239,7 +239,7 @@ void ip_process_packet(ip_state_t *ip_state, const void *packet, size_t len)
 
     size_t option_count = header_length - sizeof(ip_packet_t)/4;
     if (option_count > 0) {
-        #warning "TODO: Handle IP options"
+        // TODO: Handle IP options
         return;
     }
     

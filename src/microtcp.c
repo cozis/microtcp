@@ -187,7 +187,6 @@ static void send_arp_packet(void *data, mac_address_t dst)
     frame->proto = cpu_to_net_u16(ETHERNET_PROTOCOL_ARP);
 
     // TODO: What about the CRC?
-    #warning "TODO: Calculate Ethernet CRC"
 
     int n = mtcp->callbacks.send(mtcp->callbacks.data, buffer->data, buffer->used);
     if (n < 0)
@@ -828,9 +827,10 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
             goto unlock_and_exit; // Socket limit reached
         }
 
-        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, socket, ready_to_accept);
+        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, socket, false, ready_to_accept);
         if (listener == NULL) {
-            #warning "This error code should be more specific, but the TCP module isn't stable yet"
+            // FIXME: This error code should be more specific, 
+            //        but the TCP module isn't stable yet
             errcode2 = MICROTCP_ERRCODE_TCPERROR;
             push_unlinked_socket_into_free_list(mtcp, socket);
             goto unlock_and_exit;
@@ -870,10 +870,22 @@ void microtcp_close(microtcp_socket_t *socket)
 
     microtcp_t *mtcp = socket->mtcp;
 
-    #warning "sockets should unregister from all multiplexers"
-
     LOCK_WHEN_THREADED(mtcp);
     {
+
+#ifdef MICROTCP_USING_MUX
+        // Unregister from all multiplexers
+        while (socket->mux_list) {
+            // The unregister operation only has 
+            // an effect when all of the triggered
+            // events of the socket are consumed,
+            // so to unregister immediately we need
+            // to untrigger the events
+            socket->mux_list->triggered_events = 0;
+            microtcp_mux_unregister(socket->mux_list->mux, socket, ~0);
+        }
+#endif
+
         switch (socket->type) {
             
             case SOCKET_LISTENER:
@@ -1038,7 +1050,10 @@ size_t microtcp_recv(microtcp_socket_t *socket,
                 errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
         }
     }
-unlock_and_exit:
+    
+    goto unlock_and_exit; // Warning
+    unlock_and_exit:
+    
     UNLOCK_WHEN_THREADED(mtcp);
 
     if (errcode)
@@ -1082,7 +1097,8 @@ size_t microtcp_send(microtcp_socket_t *socket,
                 errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
         }
     }
-unlock_and_exit:
+    goto unlock_and_exit; // Warning
+    unlock_and_exit:
     UNLOCK_WHEN_THREADED(mtcp);
 
     if (errcode)

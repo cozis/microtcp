@@ -31,19 +31,20 @@ void tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks
     tcp_state->listener_pool[TCP_MAX_LISTENERS-1].next = NULL;
     tcp_state->free_listener_list = tcp_state->listener_pool;
     tcp_state->used_listener_list = NULL;
+
+    tcp_timerset_init(&tcp_state->timers);
 }
 
-void tcp_free(tcp_state_t *tcp_state)
+void tcp_free(tcp_state_t *state)
 {
-    // Destroy all listening connections
-    while (tcp_state->used_listener_list != NULL)
-        tcp_listener_destroy(tcp_state->used_listener_list);
+    // It's not clear to me how to free 
+    // all of this stuff up at the moment :/
+    tcp_timerset_free(&state->timers);
 }
 
 void tcp_seconds_passed(tcp_state_t *state, size_t seconds)
 {
-    (void) state;
-    (void) seconds;
+    tcp_timerset_step(&state->timers, seconds);
 }
 
 static tcp_connection_t*
@@ -155,7 +156,7 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
 }
 
 static void emit_segment(tcp_connection_t *connection, uint8_t flags, size_t payload)
-{   
+{
     tcp_listener_t *listener = connection->listener;
     tcp_state_t    *state    = listener->state;
 
@@ -337,22 +338,79 @@ static bool ack_until(tcp_connection_t *connection, uint32_t ack_no)
     return true;
 }
 
+static void
+really_close_listener(tcp_listener_t *listener)
+{
+    tcp_state_t *state = listener->state;
+
+    // Pop listener from used list
+    {
+        // Update the reference to the listener of
+        // the one that precedes it in the list
+        if (listener->prev)
+            listener->prev->next = listener->next;
+        else
+            state->used_listener_list = listener->next;
+
+        // Update the reference to the listener of
+        // the one that follows it in the list
+        if (listener->next != NULL)
+            listener->next->prev = listener->prev;
+    }
+
+    // Push the listener in the free list
+    listener->next = state->free_listener_list;
+    state->free_listener_list = listener;
+}
+
+static bool listener_has_no_connections(const tcp_listener_t *listener)
+{
+    return listener->accepted_list == NULL 
+        && listener->non_established_list == NULL 
+        && listener->non_accepted_queue_head == NULL;
+}
+
 static void 
 really_close_connection(tcp_connection_t *connection)
 {
     tcp_listener_t *listener = connection->listener;
     tcp_state_t *state = listener->state;
 
-    // Pop connection from the accepted_list
+    // Pop connection from the list it's in
+    tcp_connection_t *next = connection->next;
     if (connection->prev)
-        connection->prev->next = connection->next;
-    else
-        listener->accepted_list = connection->next;
+        connection->prev->next = next;
+    else if (listener->accepted_list == connection)
+        listener->accepted_list = next;
+    else if (listener->non_established_list == connection)
+        listener->non_established_list = next;
+    else if (listener->non_accepted_queue_head == connection)
+        listener->non_accepted_queue_head = next;        
+    tcp_connection_t *prev = connection->prev;
+    if (next)
+        connection->next->prev = prev;
+    else if (listener->non_accepted_queue_tail == connection)
+        listener->non_accepted_queue_tail = prev;
 
     // Push it into the free connection list
     connection->prev = NULL;
     connection->next = state->free_connection_list;
     state->free_connection_list = connection;
+
+    // If the listener is waiting to be closed
+    // and this was the last connection it was
+    // holding, then free the listener
+    if (listener->closed == true && listener_has_no_connections(listener))
+        really_close_listener(listener);
+}
+
+static void timeout_callback_time_wait(void *data)
+{
+    tcp_connection_t *connection = data;
+    assert(connection->state == TCP_STATE_TIME_WAIT);
+
+    // We can finally free up this connection structure!
+    really_close_connection(connection);
 }
 
 void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
@@ -387,6 +445,13 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
 
     tcp_connection_t *connection = find_connection_associated_to_listener(listener, sender, reordered_src_port);
     if (!connection) {
+
+        if (listener->closed) {
+            // Listener was closed by the user, so already
+            // open connections are ok but new ones are not
+            // allowed.
+            return;
+        }
 
         TCP_DEBUG_LOG("Connection request from port %d", reordered_src_port);
 
@@ -534,9 +599,16 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
             if (segment->flags & (TCP_FLAG_FIN | TCP_FLAG_ACK)) {
 
                 TCP_DEBUG_LOG("FIN-WAIT-1 -> TIME-WAIT");
+    
                 connection->rcv_nxt++; // FIN ghost byte
                 emit_segment(connection, TCP_FLAG_ACK, 0);
+    
                 connection->state = TCP_STATE_TIME_WAIT;
+
+                // Don't close the connection just now but
+                // wait for a given amount of time first.
+                if (!tcp_timer_create(&state->timers, TCP_TIMEOUT_TIME_WAIT, timeout_callback_time_wait, connection))
+                    assert(0);
 
             } else if (segment->flags & TCP_FLAG_ACK) {
 
@@ -567,6 +639,11 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
             emit_segment(connection, TCP_FLAG_ACK, 0);
 
             connection->state = TCP_STATE_TIME_WAIT;
+
+            // Don't close the connection just now but
+            // wait for a given amount of time first.
+            if (!tcp_timer_create(&state->timers, TCP_TIMEOUT_TIME_WAIT, timeout_callback_time_wait, connection))
+                assert(0);
             break;
 
             case TCP_STATE_CLOSE_WAIT:
@@ -609,70 +686,55 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
 }
 
 tcp_listener_t*
-tcp_listener_create(tcp_state_t *state, uint16_t port, void *callback_data, 
-                    void (*callback_ready_to_accept)(void*))
+tcp_listener_create(tcp_state_t *state, uint16_t port, bool reuse,
+                    void *callback_data, void (*callback_ready_to_accept)(void*))
 {
-    if (find_listener_with_port(state, port)) {
+    tcp_listener_t *listener;
+
+    listener = find_listener_with_port(state, port);
+    if (listener && (!listener->closed || !reuse)) {
         // ERROR: A connection is already listening on this port
         TCP_DEBUG_LOG("Faile to create listener on port %d because there already exists one", port);
         return NULL;
     }
 
-    // Pop a listener connection structure from the free list
-    if (state->free_listener_list == NULL) {
-        // ERROR: Reached listener connection limit
-        TCP_DEBUG_LOG("TCP connection limit");
-        return NULL;
+    if (listener)
+        listener->closed = false;
+    else {
+
+        // Pop a listener connection structure from the free list
+        if (state->free_listener_list == NULL) {
+            // ERROR: Reached listener connection limit
+            TCP_DEBUG_LOG("TCP connection limit");
+            return NULL;
+        }
+        listener = state->free_listener_list;
+        state->free_listener_list = listener->next;
+
+        // Initialize listener structure
+        listener->state  = state;
+        listener->closed = false;
+        listener->port   = port;
+        listener->accepted_list = NULL;
+        listener->non_established_list    = NULL;
+        listener->non_accepted_queue_head = NULL;
+        listener->non_accepted_queue_tail = NULL;
+        listener->callback_data = callback_data;
+        listener->callback_ready_to_accept = callback_ready_to_accept;
+
+        // Push listener connection structure to the used list
+        listener->prev = NULL;
+        listener->next = state->used_listener_list;
+        if (state->used_listener_list)
+            state->used_listener_list->prev = listener;
+        state->used_listener_list = listener;
     }
-    tcp_listener_t *listener = state->free_listener_list;
-    state->free_listener_list = listener->next;
-
-    // Initialize listener structure
-    listener->state = state;
-    listener->port = port;
-    listener->accepted_list = NULL;
-    listener->non_established_list = NULL;
-    listener->non_accepted_queue_head = NULL;
-    listener->non_accepted_queue_tail = NULL;
-    listener->callback_data = callback_data;
-    listener->callback_ready_to_accept = callback_ready_to_accept;
-
-    // Push listener connection structure to the used list
-    listener->prev = NULL;
-    listener->next = state->used_listener_list;
-    if (state->used_listener_list)
-        state->used_listener_list->prev = listener;
-    state->used_listener_list = listener;
-
     return listener;
 }
 
 void tcp_listener_destroy(tcp_listener_t *listener)
 {
-    #warning "The previously accepted connections should't be closed with their listener.. I think"
-
-    // TODO: Close all connections
-
-    tcp_state_t *state = listener->state;
-
-    // Pop listener from used list
-    {
-        // Update the reference to the listener of
-        // the one that precedes it in the list
-        if (listener->prev)
-            listener->prev->next = listener->next;
-        else
-            state->used_listener_list = listener->next;
-
-        // Update the reference to the listener of
-        // the one that follows it in the list
-        if (listener->next != NULL)
-            listener->next->prev = listener->prev;
-    }
-
-    // Push the listener in the free list
-    listener->next = state->free_listener_list;
-    state->free_listener_list = listener;
+    listener->closed = true;
 }
 
 tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_data, 

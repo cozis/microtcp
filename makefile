@@ -117,6 +117,8 @@ build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*
 	cat src/icmp.h   >> $@
 	printf "\n#line 1 \"src/ip.h\"\n" >> $@
 	cat src/ip.h     >> $@
+	printf "\n#line 1 \"src/tcp_timer.h\"\n" >> $@
+	cat src/tcp_timer.h    >> $@
 	printf "\n#line 1 \"src/tcp.h\"\n" >> $@
 	cat src/tcp.h    >> $@
 	printf "\n#line 1 \"src/endian.c\"\n" >> $@
@@ -127,6 +129,8 @@ build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*
 	cat src/icmp.c   >> $@
 	printf "\n#line 1 \"src/ip.c\"\n" >> $@
 	cat src/ip.c     >> $@
+	printf "\n#line 1 \"src/tcp_timer.c\"\n" >> $@
+	cat src/tcp_timer.c >> $@
 	printf "\n#line 1 \"src/tcp.c\"\n" >> $@
 	cat src/tcp.c    >> $@
 	printf "\n#line 1 \"src/microtcp.c\"\n" >> $@

@@ -3,8 +3,12 @@
 
 #ifndef MICROTCP_AMALGAMATION
 #include "defs.h"
+#include "tcp_timer.h"
 #endif
 
+#define TCP_TIMEOUT_TIME_WAIT 240
+
+#define TCP_MAX_TIMEOUTS 1024
 #define TCP_MAX_LISTENERS 32
 #define TCP_MAX_SOCKETS 1024
 #define TCP_INPUT_BUFFER_SIZE 1024
@@ -35,12 +39,19 @@ typedef struct {
 static_assert(sizeof(tcp_segment_t) == 20);
 
 typedef struct tcp_connection_t tcp_connection_t;
-typedef struct tcp_listener_t tcp_listener_t;
+typedef struct tcp_listener_t   tcp_listener_t;
 
 struct tcp_listener_t {
     tcp_state_t *state;
     tcp_listener_t *prev;
     tcp_listener_t *next;
+    bool closed; // When a listener is closed while one or more connections that is
+                 // previously accepted are open, the structure isn't deallocated
+                 // but just marked lazily as "closed". A listener in the "closed-but-not-deallocated"
+                 // state will not accept new connections but will serve the ones
+                 // its still holding.
+                 // In this state the listener can be reopened by setting the "closed"
+                 // flag to true (and keeping the old connections intact).
     uint16_t port;
     tcp_connection_t *accepted_list;
     tcp_connection_t *non_established_list;
@@ -138,20 +149,26 @@ typedef struct {
 } tcp_callbacks_t;
 
 struct tcp_state_t {
+
     ip_address_t ip;
     tcp_callbacks_t callbacks;
+
+    tcp_timerset_t timers;
+
     tcp_connection_t *free_connection_list;
-    tcp_connection_t connection_pool[TCP_MAX_SOCKETS];
+
     tcp_listener_t *used_listener_list;
     tcp_listener_t *free_listener_list;
-    tcp_listener_t listener_pool[TCP_MAX_LISTENERS];
+
+    tcp_listener_t     listener_pool[TCP_MAX_LISTENERS];
+    tcp_connection_t connection_pool[TCP_MAX_SOCKETS];
 };
 
 void              tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks);
 void              tcp_free(tcp_state_t *tcp_state);
 void              tcp_seconds_passed(tcp_state_t *state, size_t seconds);
 void              tcp_process_segment(tcp_state_t *state, ip_address_t sender, tcp_segment_t *segment, size_t len);
-tcp_listener_t   *tcp_listener_create(tcp_state_t *state, uint16_t port, void *data, void (*callback)(void*));
+tcp_listener_t   *tcp_listener_create(tcp_state_t *state, uint16_t port, bool reuse, void *data, void (*callback)(void*));
 void              tcp_listener_destroy(tcp_listener_t *listener);
 tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_data, void (*callback_ready_to_recv)(void*), void (*callback_ready_to_send)(void*));
 void              tcp_connection_destroy(tcp_connection_t *connection);

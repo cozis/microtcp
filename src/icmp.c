@@ -89,7 +89,7 @@ void icmp_process_packet(icmp_state_t *state, ip_address_t ip, const void *src, 
             }
             
             if (state->output_ptr == NULL || state->output_len < len) {
-                ICMP_DEBUG_LOG("Ignoring ECHO REQUEST because the output buffer is too small for an ECHO REPLY (have %ld, need %ld)", state->output_len, len);
+                ICMP_DEBUG_LOG("Ignoring ECHO REQUEST because the output buffer is too small for an ECHO REPLY (have %d, need %d)", (int) state->output_len, (int) len);
                 return;
             }
 
