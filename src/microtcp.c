@@ -826,8 +826,8 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
             errcode2 = MICROTCP_ERRCODE_SOCKETLIMIT;
             goto unlock_and_exit; // Socket limit reached
         }
-
-        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, socket, false, ready_to_accept);
+        
+        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, false, socket, ready_to_accept);
         if (listener == NULL) {
             // FIXME: This error code should be more specific, 
             //        but the TCP module isn't stable yet

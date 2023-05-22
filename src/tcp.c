@@ -563,8 +563,10 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
 
             move_from_non_established_list_to_non_accepted_queue(connection);
 
-            if (listener->callback_ready_to_accept)
+            if (listener->callback_ready_to_accept) {
+                assert(listener->callback_data);
                 listener->callback_ready_to_accept(listener->callback_data);
+            }
             break;
 
             case TCP_STATE_ESTAB:
@@ -698,9 +700,11 @@ tcp_listener_create(tcp_state_t *state, uint16_t port, bool reuse,
         return NULL;
     }
 
-    if (listener)
+    if (listener) {
         listener->closed = false;
-    else {
+        listener->callback_data = callback_data;
+        listener->callback_ready_to_accept = callback_ready_to_accept;
+    } else {
 
         // Pop a listener connection structure from the free list
         if (state->free_listener_list == NULL) {

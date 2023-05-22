@@ -1,13 +1,20 @@
+#include <assert.h>
+
 #ifndef MICROTCP_AMALGAMATION
 #include "tcp_timer.h"
 #endif
 
 void tcp_timerset_init(tcp_timerset_t *set)
 {
-    for (size_t i = 0; i < TCP_MAX_TIMEOUTS-1; i++)
-        set->pool[i].next = set->pool + i+1;
-    set->pool[TCP_MAX_TIMEOUTS-1].next = NULL;
-    set->free_list = set->pool;
+    static_assert(TCP_MAX_TIMERS >= 0);
+    if (TCP_MAX_TIMERS == 0)
+        set->free_list = NULL;
+    else {
+        for (size_t i = 0; i < TCP_MAX_TIMERS-1; i++)
+            set->pool[i].next = set->pool + i+1;
+        set->pool[TCP_MAX_TIMERS-1].next = NULL;
+        set->free_list = set->pool;
+    }
     set->used_list = NULL;
 }
 

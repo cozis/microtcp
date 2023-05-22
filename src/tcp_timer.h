@@ -1,6 +1,8 @@
 #include <stdint.h>
 
+#ifndef TCP_MAX_TIMERS
 #define TCP_MAX_TIMERS 1024
+#endif
 
 typedef struct tcp_timerset_t tcp_timerset_t;
 typedef struct tcp_timer_t    tcp_timer_t;
