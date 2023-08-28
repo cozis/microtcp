@@ -128,19 +128,6 @@ struct ethhdr {
 #define ARP_DEBUG_LOG(...)
 #endif
 
-typedef enum {
-    ARP_HARDWARE_ETHERNET = 1,
-} arp_hardware_type;
-
-typedef enum {
-    ARP_PROTOCOL_IP = 0x800,
-} arp_protocol_type;
-
-typedef enum {
-    ARP_OPERATION_REQUEST = 1,
-    ARP_OPERATION_REPLY = 2,
-} arp_operation_t;
-
 void arp_change_output_buffer(arp_state_t *state, void *ptr, size_t max)
 {
     if (max < sizeof(arp_packet_t))
@@ -619,19 +606,23 @@ void arp_resolve_mac(arp_state_t *state, ip_address_t ip, void *userp, void (*ca
         append_pending_request_to_used_list(state, pending_request);
         
         arp_packet_t *packet = state->output;
-        packet->hardware_type = cpu_to_net_u16(ARP_HARDWARE_ETHERNET);
-        packet->protocol_type = cpu_to_net_u16(ARP_PROTOCOL_IP);
-        packet->hardware_len = 6;
-        packet->protocol_len = 4;
-        packet->operation_type = cpu_to_net_u16(ARP_OPERATION_REQUEST);
-        packet->sender_hardware_address = state->self_mac;
-        packet->sender_protocol_address = state->self_ip;
-        packet->target_hardware_address = MAC_ZERO; // This is what we're trying to find
-        packet->target_protocol_address = ip;
+        if (packet != NULL) {
+            packet->hardware_type = cpu_to_net_u16(ARP_HARDWARE_ETHERNET);
+            packet->protocol_type = cpu_to_net_u16(ARP_PROTOCOL_IP);
+            packet->hardware_len = 6;
+            packet->protocol_len = 4;
+            packet->operation_type = cpu_to_net_u16(ARP_OPERATION_REQUEST);
+            packet->sender_hardware_address = state->self_mac;
+            packet->sender_protocol_address = state->self_ip;
+            packet->target_hardware_address = MAC_ZERO; // This is what we're trying to find
+            packet->target_protocol_address = ip;
 
-        ARP_DEBUG_LOG("Sending out ARP request to resolve MAC");
+            ARP_DEBUG_LOG("Sending out ARP request to resolve MAC");
 
-        state->send(state->send_data, MAC_BROADCAST);
+            state->send(state->send_data, MAC_BROADCAST);
+        } else {
+            ARP_DEBUG_LOG("Couldn't send ARP request because no output buffer was provided");
+        }
     }
 }
 

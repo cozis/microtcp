@@ -42,6 +42,19 @@ struct arp_pending_request_t {
     void (*callback)(void*, arp_resolution_status_t status, mac_address_t);
 };
 
+typedef enum {
+    ARP_HARDWARE_ETHERNET = 1,
+} arp_hardware_type;
+
+typedef enum {
+    ARP_PROTOCOL_IP = 0x800,
+} arp_protocol_type;
+
+typedef enum {
+    ARP_OPERATION_REQUEST = 1,
+    ARP_OPERATION_REPLY = 2,
+} arp_operation_t;
+
 typedef struct __attribute__((__packed__)) {
     uint16_t hardware_type;
     uint16_t protocol_type;
@@ -83,7 +96,7 @@ typedef struct {
     arp_pending_request_t *pending_request_free_list;
     arp_pending_request_t *pending_request_used_list;
     arp_pending_request_t *pending_request_used_tail;
-    arp_pending_request_t pending_request_pool[ARP_MAX_PENDING_REQUESTS];
+    arp_pending_request_t  pending_request_pool[ARP_MAX_PENDING_REQUESTS];
 } arp_state_t;
 
 typedef enum {
@@ -93,9 +106,23 @@ typedef enum {
     ARP_PROCESS_RESULT_OK,
 } arp_process_result_t;
 
-void arp_init(arp_state_t *state, ip_address_t ip, mac_address_t mac, void *send_data, void (*send)(void*, mac_address_t));
+void arp_init(arp_state_t *state, 
+              ip_address_t ip, 
+              mac_address_t mac, 
+              void *send_data, 
+              void (*send)(void*, mac_address_t));
+
 void arp_free(arp_state_t *state);
-arp_process_result_t arp_process_packet(arp_state_t *state, const void *packet, size_t len);
-void arp_resolve_mac(arp_state_t *state, ip_address_t ip, void *userp, void (*callback)(void*, arp_resolution_status_t, mac_address_t));
+
+arp_process_result_t 
+arp_process_packet(arp_state_t *state, 
+                   const void *packet, 
+                   size_t len);
+
+void arp_resolve_mac(arp_state_t *state, 
+                     ip_address_t ip, 
+                     void *userp, 
+                     void (*callback)(void*, arp_resolution_status_t, mac_address_t));
+
 void arp_seconds_passed(arp_state_t *state, size_t seconds);
 void arp_change_output_buffer(arp_state_t *state, void *ptr, size_t max);

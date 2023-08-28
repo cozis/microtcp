@@ -109,6 +109,8 @@ build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*
 	printf "\n#endif /* MICROTCP_BACKGROUND_THREAD */" >> $@
 	printf "\n#line 1 \"src/defs.h\"\n" >> $@
 	cat src/defs.h >> $@
+	printf "\n#line 1 \"src/utils.h\"\n" >> $@
+	cat src/utils.h >> $@
 	printf "\n#line 1 \"src/endian.h\"\n" >> $@
 	cat src/endian.h >> $@
 	printf "\n#line 1 \"src/arp.h\"\n" >> $@
@@ -121,6 +123,8 @@ build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*
 	cat src/tcp_timer.h    >> $@
 	printf "\n#line 1 \"src/tcp.h\"\n" >> $@
 	cat src/tcp.h    >> $@
+	printf "\n#line 1 \"src/utils.c\"\n" >> $@
+	cat src/utils.c >> $@
 	printf "\n#line 1 \"src/endian.c\"\n" >> $@
 	cat src/endian.c >> $@
 	printf "\n#line 1 \"src/arp.c\"\n" >> $@
@@ -141,6 +145,9 @@ build/echo_http: examples/microhttp/main.c $(LIBDIR)/libtuntap.a 3p/include/tunt
 
 build/test: tests/test.c tests/test_tcp_timer.c src/tcp_timer.c src/tcp_timer.h
 	gcc -fprofile-arcs -ftest-coverage tests/test.c tests/test_tcp_timer.c src/tcp_timer.c -o $@ -Wall -Wextra -DTCP_MAX_TIMERS=4
+
+build/test_arp: tests/test_arp.c
+	gcc tests/test_arp.c -o build/test_arp -Wall -Wextra
 
 report: build/test
 	./build/test

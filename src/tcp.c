@@ -409,6 +409,8 @@ static void timeout_callback_time_wait(void *data)
     tcp_connection_t *connection = data;
     assert(connection->state == TCP_STATE_TIME_WAIT);
 
+    TCP_DEBUG_LOG("TIME-WAIT -> CLOSED");
+
     // We can finally free up this connection structure!
     really_close_connection(connection);
 }
