@@ -197,7 +197,7 @@ static void send_arp_packet(void *data, mac_address_t dst)
 }
 
 static int send_tcp_segment(void *data, ip_address_t ip, 
-                            const slice_list_t *slices, 
+                            const slice_t *slices, 
                             size_t num_slices)
 {
     microtcp_t *mtcp = data;
@@ -416,8 +416,7 @@ void microtcp_step(microtcp_t *mtcp)
         return;
 
     uint64_t current_time_ms = get_time_in_ms();
-    fprintf(stderr, "current_time_ms=%lld\n", current_time_ms);
-
+    
     LOCK_WHEN_THREADED(mtcp);
     {
         process_packet(mtcp, packet, size);

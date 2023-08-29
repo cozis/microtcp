@@ -16,12 +16,14 @@ static_assert(sizeof(ip_address_t) == 4);
 #define MAC_BROADCAST (mac_address_t) {.data = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
 
 typedef struct {
-    const void *src;
+    const void *ptr;
     size_t len;
-} slice_list_t;
+} slice_t;
 
 #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #define MAX(X, Y) ((X) > (Y) ? (X) : (Y))
 #define ABS(X) ((X) < 0 ? -(X) : (X))
+#define COUNT(X) ((int) (sizeof(X) / sizeof((X)[0])))
+#define SLICE(X) ((slice_t) {.ptr=&(X), .len=sizeof(X)})
 
 #endif /* MICROTCP_DEFS_H */

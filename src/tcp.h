@@ -152,7 +152,7 @@ struct tcp_connection_t {
 
 typedef struct {
     void *data;
-    int (*send)(void *data, ip_address_t ip, const slice_list_t *slices, size_t num_slices);
+    int (*send)(void *data, ip_address_t ip, const slice_t *slices, size_t num_slices);
 } tcp_callbacks_t;
 
 struct tcp_state_t {

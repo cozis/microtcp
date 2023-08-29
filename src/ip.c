@@ -134,14 +134,12 @@ int ip_send(ip_state_t *state, ip_protocol_t protocol,
             ip_address_t dst, bool no_fragm, 
             const void *src, size_t len)
 {
-    const slice_list_t slices[] = {
-        {src, len}
-    };
-    return ip_send_2(state, protocol, dst, no_fragm, slices, 1);
+    const slice_t slices[] = {{src, len}};
+    return ip_send_2(state, protocol, dst, no_fragm, slices, COUNT(slices));
 }
 
 int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst, 
-              bool no_fragm, const slice_list_t *slices, size_t num_slices)
+              bool no_fragm, const slice_t *slices, size_t num_slices)
 {
     size_t total_len = 0;
     for (size_t i = 0; i < num_slices; i++)
@@ -197,7 +195,7 @@ int ip_send_2(ip_state_t *state, ip_protocol_t protocol, ip_address_t dst,
         size_t copied_slices = 0;
         while (copied_bytes < considered_payload) {
             size_t copying = MIN(slices[copied_slices].len, considered_payload - copied_bytes);
-            memcpy(packet->payload + copied_bytes, slices[copied_slices].src, copying);
+            memcpy(packet->payload + copied_bytes, slices[copied_slices].ptr, copying);
             copied_bytes += copying;
             copied_slices++;
         }

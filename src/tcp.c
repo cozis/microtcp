@@ -128,20 +128,20 @@ typedef struct {
     uint8_t  reserved;
     uint8_t  protocol;
     uint16_t tcp_length;
-} tcp_pseudoheader_t;
+} tcp_pseudoheader_t; // Ensure packed?
 
 static uint16_t 
-calculate_checksum(const slice_list_t *slices, size_t num_slices)
+calculate_byte_checksum(const slice_t *slices, size_t num_slices)
 {
     uint32_t sum = 0xffff;
 
     for (size_t slice_idx = 0; slice_idx < num_slices; slice_idx++) {
         
-        const uint16_t *src = slices[slice_idx].src;
+        const uint16_t *ptr = slices[slice_idx].ptr;
         const size_t    len = slices[slice_idx].len;
 
         for (size_t i = 0; i < len/2; i++) {
-            sum += net_to_cpu_u16(src[i]);
+            sum += net_to_cpu_u16(ptr[i]);
             if (sum > 0xffff)
                 sum -= 0xffff;
         }
@@ -149,7 +149,7 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
         if (len & 1) {
             alignas(uint16_t) uint8_t temp[2];
             
-            temp[0] = ((uint8_t*) slices[slice_idx].src)[len-1];
+            temp[0] = ((uint8_t*) slices[slice_idx].ptr)[len-1];
             temp[1] = 0;
 
             uint16_t temp2 = *(uint16_t*) temp;
@@ -162,77 +162,116 @@ calculate_checksum(const slice_list_t *slices, size_t num_slices)
     return cpu_to_net_u16(~sum);
 }
 
-static void emit_segment(tcp_connection_t *connection, uint8_t flags, size_t payload)
+static tcp_segment_t
+compile_segment(uint32_t wnd, uint8_t flags,
+                uint16_t sport, uint16_t dport, 
+                uint32_t seq_no, uint32_t ack_no)
 {
-    tcp_listener_t *listener = connection->listener;
-    tcp_state_t    *state    = listener->state;
+    tcp_segment_t header;
+    //memset(header, 0, sizeof(tcp_segment_t));
+
+    int offset = 5; // No options
+    header.src_port = cpu_to_net_u16(sport);
+    header.dst_port = cpu_to_net_u16(dport);
+    header.flags    = flags;
+    header.seq_no   = cpu_to_net_u32(seq_no);
+    header.ack_no   = cpu_to_net_u32(ack_no);
+    header.offset1  = cpu_is_little_endian() ? 0 : offset;
+    header.offset2  = cpu_is_little_endian() ? offset : 0;
+    header.window   = cpu_to_net_u16(wnd); // Why is a 32 bit integer being backed into a 16 bit?
+    header.checksum = 0; // Will be calculated later
+    header.urgent_pointer = 0;
+
+    return header;
+}
+
+static uint16_t
+calculate_header_checksum(tcp_segment_t header, slice_t data,
+                          ip_address_t self_ip, ip_address_t peer_ip)
+{
+    tcp_pseudoheader_t pseudo;
+
+    pseudo.src_addr = self_ip;
+    pseudo.dst_addr = peer_ip;
+    pseudo.reserved = 0;
+    pseudo.protocol = 6; // TCP
+    pseudo.tcp_length = cpu_to_net_u16(sizeof(tcp_segment_t) + data.len);
+
+    slice_t list[] = { SLICE(pseudo), SLICE(header), data };
+    return calculate_byte_checksum(list, COUNT(list));
+}
+
+static void
+compile_checksum(tcp_segment_t *header, slice_t data, 
+                 ip_address_t self_ip, ip_address_t peer_ip)
+{
+    header->checksum = calculate_header_checksum(*header, data, self_ip, peer_ip);
+}
+
+static int 
+emit_segment_bytes(tcp_state_t *tcp, ip_address_t ip, 
+                   tcp_segment_t header, slice_t data)
+{
+    slice_t slices[] = { SLICE(header), data };
+    return tcp->callbacks.send(tcp->callbacks.data, ip, slices, COUNT(slices));
+}
+
+static slice_t 
+get_pending_output_data(tcp_connection_t *c, size_t max)
+{
+    slice_t s;
 
     // [snd_wnd + snd_una - snd_nxt] is the number of bytes that
     // are in the output buffer but weren't sent yet
-    size_t payload_being_sent = MIN(payload, connection->snd_wnd + connection->snd_una - connection->snd_nxt);
-    size_t total_segment_size = sizeof(tcp_segment_t) + payload_being_sent;
+    s.ptr = c->out_buffer + c->snd_nxt - c->snd_una;
+    s.len = MIN(max, c->snd_wnd + c->snd_una - c->snd_nxt);
+    return s;
+}
 
-    uint32_t ack_no = 0;
-    if (flags & TCP_FLAG_ACK)
-        ack_no = connection->rcv_nxt;
-    
-    uint32_t seq_no = connection->snd_nxt;
+// Send a tcp segment on the connection
+// with a maximum payload of "payload" and
+// the specified flags.
+static void 
+emit_segment(tcp_connection_t *c, uint8_t flags, size_t max_payload)
+{
+    tcp_listener_t *listener = c->listener;
+    tcp_state_t    *state    = listener->state;
 
-    int offset = 5; // No options
-    tcp_segment_t header = {
-        .src_port = cpu_to_net_u16(listener->port),
-        .dst_port = cpu_to_net_u16(connection->peer_port),
-        .flags    = flags,
-        .seq_no   = cpu_to_net_u32(seq_no),
-        .ack_no   = cpu_to_net_u32(ack_no),
-        .offset1  = cpu_is_little_endian() ? 0 : offset,
-        .offset2  = cpu_is_little_endian() ? offset : 0,
-        .window   = cpu_to_net_u16(connection->rcv_wnd), // Why is a 32 bit integer being backed into a 16 bit?
-        .checksum = 0, // Will be calculated later
-        .urgent_pointer = 0,
-    };
+    slice_t data = get_pending_output_data(c, max_payload);
 
-    tcp_pseudoheader_t pseudo_header = {
-        .src_addr = state->ip,
-        .dst_addr = connection->peer_ip,
-        .reserved = 0,
-        .protocol = 6, // TCP
-        .tcp_length = cpu_to_net_u16(total_segment_size),
-    };
+    uint16_t  sport = listener->port;
+    uint16_t  dport = c->peer_port;
+    uint32_t ack_no = (flags & TCP_FLAG_ACK) ? c->rcv_nxt : 0;
+    uint32_t seq_no = c->snd_nxt;
 
-    const void *send_ptr = connection->out_buffer + connection->snd_nxt - connection->snd_una;
-    size_t      send_len = payload_being_sent;
+    ip_address_t self_ip = state->ip;
+    ip_address_t peer_ip = c->peer_ip;
 
-    header.checksum = calculate_checksum((slice_list_t[]) {
-        {&pseudo_header, sizeof(tcp_pseudoheader_t)},
-        {&header, sizeof(tcp_segment_t)},
-        {send_ptr, send_len},
-    }, 3);
+    tcp_segment_t header = compile_segment(c->rcv_wnd, flags, sport, dport, seq_no, ack_no);
+    compile_checksum(&header, data, self_ip, peer_ip);
+    int result = emit_segment_bytes(state, peer_ip, header, data);
 
-    int result = state->callbacks.send(state->callbacks.data, connection->peer_ip, (slice_list_t[]) {
-        {&header, sizeof(tcp_segment_t)},
-        {send_ptr, send_len},
-    }, 2);
+    if (result < 0)
+        return; // It wasn't possible to send out bytes. 
+                // We'll try again later!
 
-    if (result < 0) {
-        // It wasn't possible to send out bytes. We'll try again later!
-    } else {
-        size_t actually_sent_bytes = (size_t) result;
-
-        if (actually_sent_bytes < sizeof(tcp_segment_t)) { // What about options??
-            // Not even the TCP header was sent. I hope this
-            // doesn't ever happen!
-            assert(0);
-        } else {
-            size_t actually_sent_payload_bytes = actually_sent_bytes - sizeof(tcp_segment_t);
-            connection->snd_nxt += actually_sent_payload_bytes;
-        }
+    if (result < (int) sizeof(tcp_segment_t)) { // What about options??
+        // Not even the TCP header was sent. 
+        // I hope this nexer happens!
+        assert(0);
+        return;
     }
 
-    if (!connection->calculating_rtt) {
-        connection->calculating_rtt = true;
-        connection->rtt_calc_seq = connection->snd_nxt; // -1?
-        connection->rtt_calc_time = connection->listener->state->timers.current_time_ms;
+    c->snd_nxt += result - sizeof(tcp_segment_t);
+
+    // Increment for ghost bytes
+    if (flags & TCP_FLAG_SYN) c->snd_nxt++;
+    if (flags & TCP_FLAG_FIN) c->snd_nxt++;
+
+    if (c->calculating_rtt == false && seq_no < c->snd_nxt) {
+        c->calculating_rtt = true;
+        c->rtt_calc_seq = seq_no;
+        c->rtt_calc_time = c->listener->state->timers.current_time_ms;
     }
 }
 
@@ -546,7 +585,6 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
         // Instead of incrementing the snd_una for the SYN we just send,
         // we'll ignore it and also ignore it when the respective ACK si
         // received.
-        connection->snd_nxt++;
 
         TCP_DEBUG_LOG("Connection request handled");
 
@@ -865,14 +903,12 @@ void tcp_connection_destroy(tcp_connection_t *connection)
         case TCP_STATE_ESTAB:
         TCP_DEBUG_LOG("ESTAB -> FIN-WAIT-1");
         emit_segment(connection, TCP_FLAG_FIN | TCP_FLAG_ACK, 0);
-        connection->snd_nxt++; // FIN ghost byte
         connection->state = TCP_STATE_FIN_WAIT_1; 
         break;
     
         case TCP_STATE_CLOSE_WAIT:
         TCP_DEBUG_LOG("ESTAB -> LAST-ACK");
         emit_segment(connection, TCP_FLAG_FIN | TCP_FLAG_ACK, 0);
-        connection->snd_nxt++; // FIN ghost byte
         connection->state = TCP_STATE_LAST_ACK;
         break;
 
