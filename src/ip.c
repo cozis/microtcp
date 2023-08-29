@@ -29,7 +29,6 @@ static uint16_t calculate_checksum_ip(const void *src, size_t len)
     return cpu_to_net_u16(~sum);
 }
 
-
 static ip_plugged_protocol_t *
 find_protocol_with_id(ip_state_t *ip_state, uint8_t protocol)
 {
@@ -125,10 +124,10 @@ void ip_change_output_buffer(ip_state_t *state, void *ptr, size_t max)
     icmp_change_output_buffer(&state->icmp_state, (ip_packet_t*) ptr + 1, max - sizeof(ip_packet_t));
 }
 
-void ip_seconds_passed(ip_state_t *state, size_t seconds)
+void ip_ms_passed(ip_state_t *state, size_t ms)
 {
     (void) state;
-    (void) seconds;
+    (void) ms;
 }
 
 int ip_send(ip_state_t *state, ip_protocol_t protocol, 

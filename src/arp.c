@@ -223,8 +223,10 @@ static void arp_translation_table_seconds_passed(arp_translation_table_t *table,
     }
 }
 
-void arp_seconds_passed(arp_state_t *state, size_t seconds)
+void arp_ms_passed(arp_state_t *state, size_t ms)
 {
+    size_t seconds = ms / 1000;
+    
     state->time += seconds;
 
     // Scan through all of the timed-out entries

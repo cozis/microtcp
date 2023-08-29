@@ -6,7 +6,7 @@
 #include "tcp_timer.h"
 #endif
 
-#define TCP_TIMEOUT_TIME_WAIT 240
+#define TCP_TIMEOUT_TIME_WAIT 240000
 
 #define TCP_MAX_TIMEOUTS 1024
 #define TCP_MAX_LISTENERS 32
@@ -88,6 +88,13 @@ struct tcp_connection_t {
     ip_address_t peer_ip; // Network byte order
     uint16_t     peer_port; // CPU byte order
 
+    uint64_t rtt;
+    uint64_t dev_rtt;
+
+    bool calculating_rtt;
+    uint32_t rtt_calc_seq;
+    uint64_t rtt_calc_time;
+
     // Send Sequence Space
     //
     //               1         2          3          4      
@@ -166,7 +173,7 @@ struct tcp_state_t {
 
 void              tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callbacks_t callbacks);
 void              tcp_free(tcp_state_t *tcp_state);
-void              tcp_seconds_passed(tcp_state_t *state, size_t seconds);
+void              tcp_ms_passed(tcp_state_t *state, size_t ms);
 void              tcp_process_segment(tcp_state_t *state, ip_address_t sender, tcp_segment_t *segment, size_t len);
 tcp_listener_t   *tcp_listener_create(tcp_state_t *state, uint16_t port, bool reuse, void *data, void (*callback)(void*));
 void              tcp_listener_destroy(tcp_listener_t *listener);

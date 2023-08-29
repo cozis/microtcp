@@ -105,7 +105,7 @@ struct microtcp_socket_t {
 
 struct microtcp_t {
 
-    time_t last_update_time;
+    uint64_t last_update_time_ms;
 
 #ifdef MICROTCP_BACKGROUND_THREAD
     bool thread_should_stop;
@@ -396,6 +396,13 @@ void microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len)
     UNLOCK_WHEN_THREADED(mtcp);
 }
 
+static uint64_t get_time_in_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
 void microtcp_step(microtcp_t *mtcp)
 {
     char packet[1024]; // This buffer is the bottleneck for the 
@@ -408,18 +415,20 @@ void microtcp_step(microtcp_t *mtcp)
     if (size < 0)
         return;
 
+    uint64_t current_time_ms = get_time_in_ms();
+    fprintf(stderr, "current_time_ms=%lld\n", current_time_ms);
+
     LOCK_WHEN_THREADED(mtcp);
     {
         process_packet(mtcp, packet, size);
         
-        time_t current_time = time(NULL);
-        int secs = (float) (current_time - mtcp->last_update_time);
-                    
-        if (secs > 0) {
-            ip_seconds_passed(&mtcp->ip_state, secs);
-            arp_seconds_passed(&mtcp->arp_state, secs);
-            tcp_seconds_passed(&mtcp->tcp_state, secs);
-            mtcp->last_update_time = current_time;
+        uint64_t ms = (current_time_ms - mtcp->last_update_time_ms);
+        
+        if (ms > 0) {
+            ip_ms_passed(&mtcp->ip_state, ms);
+            arp_ms_passed(&mtcp->arp_state, ms);
+            tcp_ms_passed(&mtcp->tcp_state, ms);
+            mtcp->last_update_time_ms = current_time_ms;
         }
     }
     UNLOCK_WHEN_THREADED(mtcp);
@@ -458,7 +467,7 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
     mtcp->ip = parsed_ip;
     mtcp->mac = parsed_mac;
     mtcp->callbacks = callbacks;
-    mtcp->last_update_time = time(NULL);
+    mtcp->last_update_time_ms = get_time_in_ms();
 
     mtcp->used_buffer = NULL;
     mtcp->wait_buffer_list = NULL;

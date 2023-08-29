@@ -42,9 +42,9 @@ void tcp_free(tcp_state_t *state)
     tcp_timerset_free(&state->timers);
 }
 
-void tcp_seconds_passed(tcp_state_t *state, size_t seconds)
+void tcp_ms_passed(tcp_state_t *state, size_t ms)
 {
-    tcp_timerset_step(&state->timers, seconds);
+    tcp_timerset_step(&state->timers, ms);
 }
 
 static tcp_connection_t*
@@ -73,6 +73,13 @@ connection_create(tcp_listener_t *listener,
         connection->callback_ready_to_send = NULL;
 
         connection->state = TCP_STATE_CLOSED;
+
+        connection->rtt = 0;
+        connection->dev_rtt = 0;
+
+        connection->calculating_rtt = false;
+        connection->rtt_calc_seq = 0;
+        connection->rtt_calc_time = 0;
 
         connection->peer_port = peer_port;
         connection->peer_ip   = peer_ip;
@@ -110,7 +117,7 @@ find_listener_with_port(tcp_state_t *state, uint16_t port)
     return NULL;
 }
 
-static uint32_t choose_sequence_no()
+static uint32_t choose_sequence_no(void)
 {
     return 0;
 }
@@ -222,6 +229,11 @@ static void emit_segment(tcp_connection_t *connection, uint8_t flags, size_t pay
         }
     }
 
+    if (!connection->calculating_rtt) {
+        connection->calculating_rtt = true;
+        connection->rtt_calc_seq = connection->snd_nxt; // -1?
+        connection->rtt_calc_time = connection->listener->state->timers.current_time_ms;
+    }
 }
 
 static void handle_received_data(tcp_connection_t *connection, 
@@ -331,9 +343,29 @@ static bool ack_until(tcp_connection_t *connection, uint32_t ack_no)
     }
     
     size_t newly_acked_bytes = ack_no - connection->snd_una;
-    memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
-    connection->snd_wnd -= newly_acked_bytes;
+
+    if (ack_no > 1) { // Only remove data from the output buffer when
+                      // the acked data wasn't a ghost byte
+        memmove(connection->out_buffer, connection->out_buffer + newly_acked_bytes, connection->snd_wnd - newly_acked_bytes);
+        connection->snd_wnd -= newly_acked_bytes;
+    }
     connection->snd_una = ack_no;
+
+    TCP_DEBUG_LOG("calculating_rtt=%s, ack_no=%d, calc_seq=%d", connection->calculating_rtt ? "true" : "false", ack_no, connection->rtt_calc_seq);
+    if (connection->calculating_rtt) {
+        if (ack_no >= connection->rtt_calc_seq) {
+
+            uint64_t rtt = connection->listener->state->timers.current_time_ms - connection->rtt_calc_time;
+            TCP_DEBUG_LOG("Estimated RTT=%lld", rtt);
+
+            float w1 = 0.9;
+            float w2 = 0.125;
+            connection->rtt = w1 * rtt + (1-w1) * connection->rtt;
+            connection->dev_rtt = w2 * ABS((int) rtt - (int) connection->rtt) + (1-w2) * connection->dev_rtt;
+
+            connection->calculating_rtt = false;
+        }
+    }
 
     return true;
 }
@@ -519,6 +551,9 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
         TCP_DEBUG_LOG("Connection request handled");
 
     } else {
+
+        TCP_DEBUG_LOG("RTT=%lld, DevRTT=%lld", connection->rtt, connection->dev_rtt);
+
         // Something sent to an already instanciated
         // connection. Since there is an instance, it
         // means that at least the first SYN was received
@@ -560,7 +595,8 @@ void tcp_process_segment(tcp_state_t *state, ip_address_t sender,
                               "the peer will retransmit it");
 
             // The connection is now established.
-            connection->snd_una = net_to_cpu_u32(segment->ack_no);
+            uint32_t ack_no = net_to_cpu_u32(segment->ack_no);
+            ack_until(connection, ack_no);
             connection->state = TCP_STATE_ESTAB;
 
             move_from_non_established_list_to_non_accepted_queue(connection);
@@ -747,8 +783,6 @@ tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_d
                                       void (*callback_ready_to_recv)(void*), 
                                       void (*callback_ready_to_send)(void*))
 {
-    (void) listener;
-
     if (!listener->non_accepted_queue_head)
         // Nothing to accept
         return NULL;

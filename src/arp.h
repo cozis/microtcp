@@ -124,5 +124,5 @@ void arp_resolve_mac(arp_state_t *state,
                      void *userp, 
                      void (*callback)(void*, arp_resolution_status_t, mac_address_t));
 
-void arp_seconds_passed(arp_state_t *state, size_t seconds);
+void arp_ms_passed(arp_state_t *state, size_t ms);
 void arp_change_output_buffer(arp_state_t *state, void *ptr, size_t max);

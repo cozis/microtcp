@@ -17,15 +17,15 @@ struct tcp_timer_t {
 };
 
 struct tcp_timerset_t {
-    uint64_t current_time;
+    uint64_t current_time_ms;
     tcp_timer_t *used_list;
     tcp_timer_t *free_list;
     tcp_timer_t pool[TCP_MAX_TIMERS];
 };
 
-void tcp_timerset_step(tcp_timerset_t *set, size_t seconds);
+void tcp_timerset_step(tcp_timerset_t *set, size_t ms);
 void tcp_timerset_init(tcp_timerset_t *set);
 void tcp_timerset_free(tcp_timerset_t *set);
 void tcp_timer_disable(tcp_timer_t *timer);
-tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t seconds, 
+tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms, 
                               void (*callback)(void*), void *data);

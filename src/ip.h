@@ -54,7 +54,7 @@ typedef struct {
     ip_plugged_protocol_t plugged_protocols[IP_PLUGGED_PROTOCOLS_MAX];
 } ip_state_t;
 
-void ip_seconds_passed(ip_state_t *state, size_t seconds);
+void ip_ms_passed(ip_state_t *state, size_t ms);
 void ip_change_output_buffer(ip_state_t *state, void *ptr, size_t max);
 void ip_init(ip_state_t *state, ip_address_t ip, void *send_data, void (*send)(void*, ip_address_t, size_t));
 void ip_free(ip_state_t *state);

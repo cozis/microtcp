@@ -41,7 +41,7 @@ void tcp_timer_disable(tcp_timer_t *timer)
     set->free_list = timer;
 }
 
-tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t seconds, 
+tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms, 
                               void (*callback)(void*), void *data)
 {
     assert(callback);
@@ -58,7 +58,7 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t seconds,
     //       first item of the free list.
 
     timer->set = set;
-    timer->deadline = set->current_time + seconds;
+    timer->deadline = set->current_time_ms + ms;
     timer->data = data;
     timer->callback = callback;
     
@@ -107,11 +107,11 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t seconds,
     return timer;
 }
 
-void tcp_timerset_step(tcp_timerset_t *set, size_t seconds)
+void tcp_timerset_step(tcp_timerset_t *set, size_t ms)
 {
-    set->current_time += seconds;
+    set->current_time_ms += ms;
 
-    if (set->used_list == NULL || set->used_list->deadline > set->current_time)
+    if (set->used_list == NULL || set->used_list->deadline > set->current_time_ms)
         // No timeouts triggered
         return;
 
@@ -122,7 +122,7 @@ void tcp_timerset_step(tcp_timerset_t *set, size_t seconds)
     tcp_timer_t *timeout = set->used_list;
     while (timeout) {
 
-        if (timeout->deadline > set->current_time)
+        if (timeout->deadline > set->current_time_ms)
             // This timeout didn't trigger, so the last 
             // timed out timeout was the previous one.
             break;
