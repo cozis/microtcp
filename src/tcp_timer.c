@@ -1,3 +1,4 @@
+#include <string.h>
 #include <assert.h>
 
 #ifndef MICROTCP_AMALGAMATION
@@ -16,6 +17,7 @@ void tcp_timerset_init(tcp_timerset_t *set)
         set->free_list = set->pool;
     }
     set->used_list = NULL;
+    set->current_time_ms = 0;
 }
 
 void tcp_timerset_free(tcp_timerset_t *set)
@@ -42,6 +44,7 @@ void tcp_timer_disable(tcp_timer_t *timer)
 }
 
 tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms, 
+                              const char *name,
                               void (*callback)(void*), void *data)
 {
     assert(callback);
@@ -61,7 +64,9 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms,
     timer->deadline = set->current_time_ms + ms;
     timer->data = data;
     timer->callback = callback;
-    
+    strncpy(timer->name, name, sizeof(timer->name));
+    timer->name[TCP_MAX_TIMER_NAME] = '\0';
+
     // Insert the timer structure into the timer list
     // in an orderly fashon
     if (set->used_list == NULL) {
@@ -114,14 +119,14 @@ void tcp_timerset_step(tcp_timerset_t *set, size_t ms)
     if (set->used_list == NULL || set->used_list->deadline > set->current_time_ms)
         // No timeouts triggered
         return;
-
+    
     tcp_timer_t *timedout_head = set->used_list; // We know that at least one timeout triggered
     tcp_timer_t *timedout_tail; // This has to be determined by the following loop
 
     // Scan through all of the timeouts that just triggered
     tcp_timer_t *timeout = set->used_list;
     while (timeout) {
-
+        
         if (timeout->deadline > set->current_time_ms)
             // This timeout didn't trigger, so the last 
             // timed out timeout was the previous one.

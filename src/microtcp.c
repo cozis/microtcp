@@ -135,13 +135,13 @@ struct microtcp_t {
 const char *microtcp_strerror(microtcp_errcode_t errcode)
 {
     switch (errcode) {
-        case MICROTCP_ERRCODE_NONE: return "No error occurred";
-        case MICROTCP_ERRCODE_SOCKETLIMIT: return "Can't create a socket because the socket limit per microtcp instance was reached";
-        case MICROTCP_ERRCODE_TCPERROR: return "An error occurred at the TCP layer";
-        case MICROTCP_ERRCODE_BADCONDVAR: return "Condition variable error";
-        case MICROTCP_ERRCODE_NOTLISTENER: return "Invalid operation on a non-listener socket";
-        case MICROTCP_ERRCODE_CANTBLOCK: return "Can't execute a blocking call for this function";
-        case MICROTCP_ERRCODE_WOULDBLOCK: return "Can't executa e non-blocking call for this function";
+        case MICROTCP_ERRCODE_NONE:          return "No error occurred";
+        case MICROTCP_ERRCODE_SOCKETLIMIT:   return "Can't create a socket because the socket limit per microtcp instance was reached";
+        case MICROTCP_ERRCODE_TCPERROR:      return "An error occurred at the TCP layer";
+        case MICROTCP_ERRCODE_BADCONDVAR:    return "Condition variable error";
+        case MICROTCP_ERRCODE_NOTLISTENER:   return "Invalid operation on a non-listener socket";
+        case MICROTCP_ERRCODE_CANTBLOCK:     return "Can't execute a blocking call for this function";
+        case MICROTCP_ERRCODE_WOULDBLOCK:    return "Can't executa e non-blocking call for this function";
         case MICROTCP_ERRCODE_NOTCONNECTION: return "Invalid operation on a non-connection socket";
     }
     return "???";
@@ -416,7 +416,7 @@ void microtcp_step(microtcp_t *mtcp)
         return;
 
     uint64_t current_time_ms = get_time_in_ms();
-    
+
     LOCK_WHEN_THREADED(mtcp);
     {
         process_packet(mtcp, packet, size);

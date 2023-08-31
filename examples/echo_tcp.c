@@ -11,7 +11,7 @@ int main(void)
         return -1;
     }
     
-    uint16_t port = 80;
+    uint16_t port = 8081;
     microtcp_socket_t *server = microtcp_open(mtcp, port, &errcode);
     if (errcode) {
         fprintf(stderr, "Error: %s\n", microtcp_strerror(errcode));

@@ -71,9 +71,9 @@ typedef struct {
 } microtcp_muxevent_t;
 
 typedef struct microtcp_mux_t microtcp_mux_t;
-microtcp_mux_t    *microtcp_mux_create(microtcp_t *mtcp);
-void               microtcp_mux_destroy(microtcp_mux_t *mux);
-bool               microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int events, void *userp);
-bool               microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int events);
-bool               microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev);
+microtcp_mux_t *microtcp_mux_create(microtcp_t *mtcp);
+void            microtcp_mux_destroy(microtcp_mux_t *mux);
+bool            microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int events, void *userp);
+bool            microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int events);
+bool            microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev);
 #endif

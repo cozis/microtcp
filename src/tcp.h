@@ -6,7 +6,8 @@
 #include "tcp_timer.h"
 #endif
 
-#define TCP_TIMEOUT_TIME_WAIT 240000
+#define TCP_TIMEOUT_TIME_WAIT 1000
+//240000
 
 #define TCP_MAX_TIMEOUTS 1024
 #define TCP_MAX_LISTENERS 32
@@ -28,13 +29,13 @@ typedef struct {
     uint16_t dst_port;
     uint32_t seq_no;
     uint32_t ack_no;
-    uint8_t offset1: 4; // When CPU is big endian
-    uint8_t offset2: 4; // When CPU is little endian
+    uint8_t  offset1: 4; // When CPU is big endian
+    uint8_t  offset2: 4; // When CPU is little endian
     uint8_t  flags;
     uint16_t window;
     uint16_t checksum;
     uint16_t urgent_pointer;
-    char payload[];
+    char     payload[];
 } tcp_segment_t;
 static_assert(sizeof(tcp_segment_t) == 20);
 
@@ -88,12 +89,14 @@ struct tcp_connection_t {
     ip_address_t peer_ip; // Network byte order
     uint16_t     peer_port; // CPU byte order
 
-    uint64_t rtt;
-    uint64_t dev_rtt;
+    uint64_t estimated_rtt;
+    uint64_t estimated_dev;
 
     bool calculating_rtt;
     uint32_t rtt_calc_seq;
     uint64_t rtt_calc_time;
+
+    tcp_timer_t *retr_timer;
 
     // Send Sequence Space
     //
@@ -146,8 +149,10 @@ struct tcp_connection_t {
                       // It's the sequence number of the last
                       // byte sent and acknowledged by the peer.
 
-    char out_buffer[TCP_OUTPUT_BUFFER_SIZE];
+    bool  in_buffer_syn;
+    bool  in_buffer_fin;
     char  in_buffer[TCP_INPUT_BUFFER_SIZE];
+    char out_buffer[TCP_OUTPUT_BUFFER_SIZE];
 };
 
 typedef struct {

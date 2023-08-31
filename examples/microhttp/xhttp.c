@@ -1283,6 +1283,8 @@ static void when_data_is_ready_to_be_read(context_t *ctx, conn_t *conn)
         downloaded = b->used - before;
     }
 
+    fprintf(stderr, "XHTTP :: Downloaded %d bytes\n", downloaded);
+
     int served_during_this_while_loop = 0;
 
     while(1)

@@ -6,3 +6,5 @@ loop2.exe
 3p/include/*
 build
 *.gcov
+*.gcno
+*.gcda

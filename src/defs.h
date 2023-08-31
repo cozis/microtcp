@@ -16,7 +16,7 @@ static_assert(sizeof(ip_address_t) == 4);
 #define MAC_BROADCAST (mac_address_t) {.data = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}}
 
 typedef struct {
-    const void *ptr;
+    void  *ptr;
     size_t len;
 } slice_t;
 

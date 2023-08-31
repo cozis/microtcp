@@ -15,7 +15,7 @@ static void test_timer(void)
     tcp_timerset_init(&set);
 
     int resolved = 0;
-    tcp_timer_t *t1 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved);
+    tcp_timer_t *t1 = tcp_timer_create(&set, 5, "t1", set_int_variable_to_1, &resolved);
     
     assert(t1);
     assert(resolved == 0);
@@ -37,7 +37,7 @@ static void test_disabled_timer(void)
     tcp_timerset_init(&set);
 
     int resolved = 0;
-    tcp_timer_t *t1 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved);
+    tcp_timer_t *t1 = tcp_timer_create(&set, 5, "t1", set_int_variable_to_1, &resolved);
     
     assert(t1);
     assert(resolved == 0);
@@ -61,7 +61,7 @@ static void test_disabled_timer_2(void)
     tcp_timerset_init(&set);
 
     int resolved = 0;
-    tcp_timer_t *t1 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved);
+    tcp_timer_t *t1 = tcp_timer_create(&set, 5, "t1", set_int_variable_to_1, &resolved);
     
     assert(t1);
     assert(resolved == 0);
@@ -86,8 +86,8 @@ static void test_disabled_timer_3(void)
 
     int resolved_1 = 0;
     int resolved_2 = 0;
-    tcp_timer_t *t1 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved_1);
-    tcp_timer_t *t2 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved_2);
+    tcp_timer_t *t1 = tcp_timer_create(&set, 5, "t1", set_int_variable_to_1, &resolved_1);
+    tcp_timer_t *t2 = tcp_timer_create(&set, 5, "t2", set_int_variable_to_1, &resolved_2);
     
     assert(t1);
     assert(t2);
@@ -116,8 +116,8 @@ static void test_disabled_timer_4(void)
 
     int resolved_1 = 0;
     int resolved_2 = 0;
-    tcp_timer_t *t1 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved_1);
-    tcp_timer_t *t2 = tcp_timer_create(&set, 5, set_int_variable_to_1, &resolved_2);
+    tcp_timer_t *t1 = tcp_timer_create(&set, 5, "t1", set_int_variable_to_1, &resolved_1);
+    tcp_timer_t *t2 = tcp_timer_create(&set, 5, "t2", set_int_variable_to_1, &resolved_2);
     
     assert(t1);
     assert(t2);
@@ -146,10 +146,10 @@ static void test_out_of_timers(void)
 
     int temp;
     for (int i = 0; i < TCP_MAX_TIMERS; i++) {
-        tcp_timer_t *t = tcp_timer_create(&set, 5, set_int_variable_to_1, &temp);
+        tcp_timer_t *t = tcp_timer_create(&set, 5, "t1", set_int_variable_to_1, &temp);
         assert(t != NULL);
     }
-    tcp_timer_t *t = tcp_timer_create(&set, 5, set_int_variable_to_1, &temp);
+    tcp_timer_t *t = tcp_timer_create(&set, 5, "t2", set_int_variable_to_1, &temp);
     assert(t == NULL);
 
     tcp_timerset_free(&set);

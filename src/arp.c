@@ -718,19 +718,21 @@ arp_process_result_t arp_process_packet(arp_state_t *state, const void *packet, 
             // Generate the ARP REPLY
             
             arp_packet_t *response = state->output;
-            response->hardware_type = packet2->hardware_type;
-            response->protocol_type = packet2->protocol_type;
-            response->hardware_len  = packet2->hardware_len;
-            response->protocol_len  = packet2->protocol_len;
-            response->operation_type = cpu_to_net_u16(ARP_OPERATION_REPLY);
-            response->sender_hardware_address = state->self_mac;
-            response->sender_protocol_address = state->self_ip;
-            response->target_hardware_address = packet2->sender_hardware_address;
-            response->target_protocol_address = packet2->sender_protocol_address;
+            if (state->output) {
+                response->hardware_type = packet2->hardware_type;
+                response->protocol_type = packet2->protocol_type;
+                response->hardware_len  = packet2->hardware_len;
+                response->protocol_len  = packet2->protocol_len;
+                response->operation_type = cpu_to_net_u16(ARP_OPERATION_REPLY);
+                response->sender_hardware_address = state->self_mac;
+                response->sender_protocol_address = state->self_ip;
+                response->target_hardware_address = packet2->sender_hardware_address;
+                response->target_protocol_address = packet2->sender_protocol_address;
 
-            ARP_DEBUG_LOG("Sending reply");
+                ARP_DEBUG_LOG("Sending reply");
 
-            state->send(state->send_data, packet2->sender_hardware_address);
+                state->send(state->send_data, packet2->sender_hardware_address);
+            }
         }
     } else {
         //ARP_DEBUG_LOG("Request not for me");
