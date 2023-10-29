@@ -32,6 +32,9 @@ typedef enum {
     // Returned by microtcp_accept, microtcp_recv and microtcp_send
     MICROTCP_ERRCODE_WOULDBLOCK,
 
+    // Returned by microtcp_recv, microtcp_send
+    MICROTCP_ERRCODE_PEERCLOSED,
+
 } microtcp_errcode_t;
 
 typedef struct {

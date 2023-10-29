@@ -61,6 +61,8 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms,
     //       first item of the free list.
 
     timer->set = set;
+    timer->set_time = set->current_time_ms;
+    timer->trg_time = ms;
     timer->deadline = set->current_time_ms + ms;
     timer->data = data;
     timer->callback = callback;
@@ -125,8 +127,8 @@ void tcp_timerset_step(tcp_timerset_t *set, size_t ms)
 
     // Scan through all of the timeouts that just triggered
     tcp_timer_t *timeout = set->used_list;
-    while (timeout) {
-        
+    do {
+
         if (timeout->deadline > set->current_time_ms)
             // This timeout didn't trigger, so the last 
             // timed out timeout was the previous one.
@@ -137,7 +139,7 @@ void tcp_timerset_step(tcp_timerset_t *set, size_t ms)
 
         timedout_tail = timeout;
         timeout = timeout->next;
-    }
+    } while (timeout);
 
     // Now put the list of timed out timeouts back
     // into the free list

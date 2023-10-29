@@ -12,8 +12,8 @@
 #define TCP_MAX_TIMEOUTS 1024
 #define TCP_MAX_LISTENERS 32
 #define TCP_MAX_SOCKETS 1024
-#define TCP_INPUT_BUFFER_SIZE 1024
-#define TCP_OUTPUT_BUFFER_SIZE 1024
+#define TCP_IBUFFER_SIZE 1024
+#define TCP_OBUFFER_SIZE 1024
 
 typedef struct tcp_state_t tcp_state_t; // Predeclare for cyclic references
 
@@ -36,11 +36,28 @@ typedef struct {
     uint16_t checksum;
     uint16_t urgent_pointer;
     char     payload[];
-} tcp_segment_t;
+} __attribute__((packed)) tcp_segment_t;
 static_assert(sizeof(tcp_segment_t) == 20);
 
 typedef struct tcp_connection_t tcp_connection_t;
 typedef struct tcp_listener_t   tcp_listener_t;
+
+// After receiving a reset or close event, no 
+// methods shall be called on the connection
+// object, not even to close it.
+typedef enum {
+    TCP_CONNEVENT_CLOSE,
+    TCP_CONNEVENT_RESET,
+    TCP_CONNEVENT_RECV,
+    TCP_CONNEVENT_SEND,
+} tcp_connevent_t;
+
+typedef enum {
+    TCP_LISTENEVENT_ACCEPT,
+} tcp_listenevent_t;
+
+typedef void (*tcp_conneventcb_t)(void *data, tcp_connevent_t);
+typedef void (*tcp_listeneventcb_t)(void *data, tcp_listenevent_t);
 
 struct tcp_listener_t {
     tcp_state_t *state;
@@ -53,20 +70,35 @@ struct tcp_listener_t {
                  // its still holding.
                  // In this state the listener can be reopened by setting the "closed"
                  // flag to true (and keeping the old connections intact).
+
+    // Port the listener is listening onto
     uint16_t port;
-    tcp_connection_t *accepted_list;
-    tcp_connection_t *non_established_list;
-    tcp_connection_t *non_accepted_queue_head;
-    tcp_connection_t *non_accepted_queue_tail;
-    void (*callback_ready_to_accept)(void*);
-    void  *callback_data;
+
+    // Number of connection
+    int count;
+
+    // List of established and accepted connections
+    tcp_connection_t *accepted;
+
+    // List of connections which aren't in an established
+    // state yet.
+    tcp_connection_t *noestab;
+
+    // Queue of connections ready to be accepted
+    // (established but not accepted)
+    tcp_connection_t *qhead;
+    tcp_connection_t *qtail;
+    
+    tcp_listeneventcb_t cb_event;
+    void *cb_data;
 };
 
 typedef enum {
     TCP_STATE_CLOSED = 0,
+    TCP_STATE_LISTEN,
     TCP_STATE_SYN_SENT,
     TCP_STATE_SYN_RCVD,
-    TCP_STATE_ESTAB,
+    TCP_STATE_ESTABLISHED,
     TCP_STATE_FIN_WAIT_1,
     TCP_STATE_FIN_WAIT_2,
     TCP_STATE_CLOSE_WAIT,
@@ -76,27 +108,29 @@ typedef enum {
 } tcp_connstate_t;
 
 struct tcp_connection_t {
+    
     tcp_listener_t   *listener; // Listener that accepted this connection
     tcp_connection_t *next;
     tcp_connection_t *prev;
 
-    void  *callback_data;
-    void (*callback_ready_to_recv)(void*);
-    void (*callback_ready_to_send)(void*);
+    tcp_conneventcb_t cb_event;
+    void             *cb_data;
     
     tcp_connstate_t state;
 
     ip_address_t peer_ip; // Network byte order
     uint16_t     peer_port; // CPU byte order
 
-    uint64_t estimated_rtt;
-    uint64_t estimated_dev;
-
-    bool calculating_rtt;
-    uint32_t rtt_calc_seq;
-    uint64_t rtt_calc_time;
+    // From RFC 6298, Section 2
+    //   To compute the current RTO, a TCP sender maintains two state
+    //   variables, SRTT (smoothed round-trip time) and RTTVAR (round-trip
+    //   time variation).  In addition, we assume a clock granularity of G
+    //   seconds.
+    float srtt;
+    float rttvar;
 
     tcp_timer_t *retr_timer;
+    tcp_timer_t *wait_timer;
 
     // Send Sequence Space
     //
@@ -149,10 +183,24 @@ struct tcp_connection_t {
                       // It's the sequence number of the last
                       // byte sent and acknowledged by the peer.
 
-    bool  in_buffer_syn;
-    bool  in_buffer_fin;
-    char  in_buffer[TCP_INPUT_BUFFER_SIZE];
-    char out_buffer[TCP_OUTPUT_BUFFER_SIZE];
+    uint32_t snd_wl1; // SND.WL1 from RFC 9293
+                      // segment sequence number used for last 
+                      // window update.
+    
+    uint32_t snd_wl2; // SND.WL2 from RFC 9293
+                      // segment acknowledgment number used for 
+                      // last window update.
+
+    uint32_t last_acked; // Last sequence number of the peer that was ACKed
+
+    // If true, the next segment which will empty the
+    // output buffer will contain a FIN.
+    bool send_fin_when_fully_flushed;
+    bool waiting_ack_for_syn;
+    bool waiting_ack_for_fin;
+    size_t oused;
+    char idata[TCP_IBUFFER_SIZE];
+    char odata[TCP_OBUFFER_SIZE];
 };
 
 typedef struct {
@@ -180,10 +228,9 @@ void              tcp_init(tcp_state_t *tcp_state, ip_address_t ip, tcp_callback
 void              tcp_free(tcp_state_t *tcp_state);
 void              tcp_ms_passed(tcp_state_t *state, size_t ms);
 void              tcp_process_segment(tcp_state_t *state, ip_address_t sender, tcp_segment_t *segment, size_t len);
-tcp_listener_t   *tcp_listener_create(tcp_state_t *state, uint16_t port, bool reuse, void *data, void (*callback)(void*));
+tcp_listener_t   *tcp_listener_create(tcp_state_t *state, uint16_t port, bool reuse, void *cb_data, tcp_listeneventcb_t func);
 void              tcp_listener_destroy(tcp_listener_t *listener);
-tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *callback_data, void (*callback_ready_to_recv)(void*), void (*callback_ready_to_send)(void*));
+tcp_connection_t *tcp_listener_accept(tcp_listener_t *listener, void *cb_data, tcp_conneventcb_t func);
 void              tcp_connection_destroy(tcp_connection_t *connection);
-void              tcp_connection_finish(tcp_connection_t *connection);
 size_t            tcp_connection_recv(tcp_connection_t *connection, void *dst, size_t len);
 size_t            tcp_connection_send(tcp_connection_t *connection, const void *src, size_t len);

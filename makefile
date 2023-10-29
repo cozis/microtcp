@@ -48,13 +48,13 @@ MEMDBG=valgrind
 LIBDIR = 3p/lib
 INCDIR = 3p/include
 
-CFLAGS = $(CFLAGS_PLATFORM) -I$(INCDIR) -Ibuild/ -Wall -Wextra
-LFLAGS = -ltuntap $(LFLAGS_PLATFORM) -L$(LIBDIR)
+CFLAGS = $(CUSTOM_CFLAGS) $(CFLAGS_PLATFORM) -I$(INCDIR) -Ibuild/ -Wall -Wextra
+LFLAGS = $(CUSTOM_LFLAGS) -ltuntap $(LFLAGS_PLATFORM) -L$(LIBDIR)
 
 ifeq ($(MEMDBG),drmemory)
 	CFLAGS += -gdwarf-2
 else
-	CFLAGS += -g
+	CFLAGS += -g3
 endif
 
 .PHONY: all clean
@@ -154,7 +154,4 @@ report: build/test
 	gcov -b build/test-tcp_timer.c
 
 clean:
-	rm build/*.gcda build/*.gcno
-	rm -fr build
-	rm -fr 3p/libtuntap/build
-	rm -f 3p/lib/* 3p/include/*
+	rm -fr build 3p/libtuntap/build 3p/lib/* 3p/include/*

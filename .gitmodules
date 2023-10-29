@@ -4,3 +4,6 @@
 [submodule "3p/tinycthread"]
 	path = 3p/tinycthread
 	url = https://github.com/tinycthread/tinycthread.git
+[submodule "3p/packetdrill"]
+	path = 3p/packetdrill
+	url = https://github.com/google/packetdrill.git

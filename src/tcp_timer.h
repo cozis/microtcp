@@ -14,6 +14,8 @@ struct tcp_timer_t {
     tcp_timerset_t *set;
     tcp_timer_t *prev;
     tcp_timer_t *next;
+    uint64_t set_time;
+    uint64_t trg_time;
     uint64_t deadline;
     void (*callback)(void *data);
     void *data;

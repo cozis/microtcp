@@ -67,10 +67,10 @@ struct microtcp_mux_t {
 typedef struct buffer_t buffer_t;
 struct buffer_t {
     microtcp_t *mtcp;
-    buffer_t   *prev;
-    buffer_t   *next;
-    size_t      used;
-    char        data[1518];
+    buffer_t *prev;
+    buffer_t *next;
+    size_t used;
+    char   data[1218];
 };
 
 typedef enum {
@@ -143,6 +143,7 @@ const char *microtcp_strerror(microtcp_errcode_t errcode)
         case MICROTCP_ERRCODE_CANTBLOCK:     return "Can't execute a blocking call for this function";
         case MICROTCP_ERRCODE_WOULDBLOCK:    return "Can't executa e non-blocking call for this function";
         case MICROTCP_ERRCODE_NOTCONNECTION: return "Invalid operation on a non-connection socket";
+        case MICROTCP_ERRCODE_PEERCLOSED:    return "Peer closed the connection";
     }
     return "???";
 }
@@ -374,7 +375,8 @@ process_packet(microtcp_t *mtcp, const void *packet, size_t len)
     const ethernet_frame_t *frame = packet;
     
     switch (net_to_cpu_u16(frame->proto)) {
-        case ETHERNET_PROTOCOL_ARP: 
+
+        case ETHERNET_PROTOCOL_ARP:
         arp_process_packet(&mtcp->arp_state, frame+1, len - sizeof(ethernet_frame_t)); 
         break;
         
@@ -644,7 +646,8 @@ static microtcp_socket_t*
 pop_socket_struct_from_free_list(microtcp_t *mtcp)
 {
     microtcp_socket_t *socket = mtcp->free_socket_list;
-    mtcp->free_socket_list = socket->next;
+    if (socket)
+        mtcp->free_socket_list = socket->next;
     return socket;
 }
 
@@ -689,18 +692,24 @@ static void
 signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int events);
 #endif
 
-static void ready_to_accept(void *data)
+static void listener_event_callback(void *data, tcp_listenevent_t event)
 {
     microtcp_socket_t *socket = data;
     (void) socket;
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-    cnd_signal(&socket->something_to_accept);
+    switch (event) {
+        case TCP_LISTENEVENT_ACCEPT: cnd_signal(&socket->something_to_accept); break;
+    }
 #endif
 
 #ifdef MICROTCP_USING_MUX
-    MICROTCP_DEBUG_LOG("Signaling ACCEPT to muxes");
-    signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_ACCEPT);
+    int flags = 0;
+    switch (event) {
+        case TCP_LISTENEVENT_ACCEPT: flags = MICROTCP_MUX_ACCEPT; MICROTCP_DEBUG_LOG("Signaling ACCEPT to muxes"); break;
+    }
+    if (flags)
+        signal_events_to_muxes_associated_to_socket(socket, flags);
 #endif
 }
 
@@ -717,7 +726,7 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
             goto unlock_and_exit; // Socket limit reached
         }
         
-        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, false, socket, ready_to_accept);
+        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, false, socket, listener_event_callback);
         if (listener == NULL) {
             // FIXME: This error code should be more specific, 
             //        but the TCP module isn't stable yet
@@ -786,7 +795,9 @@ void microtcp_close(microtcp_socket_t *socket)
             break;
                 
             case SOCKET_CONNECTION:
-            tcp_connection_destroy(socket->connection);
+            if (socket->connection) // Only need to close the connection
+                                    // if the peer didn't already.
+                tcp_connection_destroy(socket->connection);
             break;
         }
 
@@ -796,33 +807,34 @@ void microtcp_close(microtcp_socket_t *socket)
     UNLOCK_WHEN_THREADED(mtcp);
 }
 
-static void ready_to_recv(void *data)
+static void conn_event_callback(void *data, tcp_connevent_t event)
 {
     microtcp_socket_t *socket = data;
     (void) socket;
 
 #ifdef MICROTCP_BACKGROUND_THREAD
-    cnd_signal(&socket->something_to_recv);
+    switch (event) {
+        
+        case TCP_CONNEVENT_RECV: MICROTCP_DEBUG_LOG("Signal RECV"); cnd_signal(&socket->something_to_recv); break;
+        case TCP_CONNEVENT_SEND: MICROTCP_DEBUG_LOG("Signal SEND"); cnd_signal(&socket->something_to_send); break;
+        
+        case TCP_CONNEVENT_RESET:
+        case TCP_CONNEVENT_CLOSE:
+        socket->connection = NULL;
+        break;
+    }
 #endif
 
 #ifdef MICROTCP_USING_MUX
-    MICROTCP_DEBUG_LOG("Signaling RECV to muxes");
-    signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_RECV);
-#endif
-}
-
-static void ready_to_send(void *data)
-{
-    microtcp_socket_t *socket = data;
-    (void) socket;
-
-#ifdef MICROTCP_BACKGROUND_THREAD
-    cnd_signal(&socket->something_to_send);
-#endif
-
-#ifdef MICROTCP_USING_MUX
-    MICROTCP_DEBUG_LOG("Signaling SEND to muxes");
-    signal_events_to_muxes_associated_to_socket(socket, MICROTCP_MUX_SEND);
+    // TODO: Maybe signal closing and reset events to muxes?
+    int flags;
+    switch (event) {
+        case TCP_CONNEVENT_RECV: flags = MICROTCP_MUX_RECV; MICROTCP_DEBUG_LOG("Signaling RECV to muxes"); break;
+        case TCP_CONNEVENT_SEND: flags = MICROTCP_MUX_SEND; MICROTCP_DEBUG_LOG("Signaling SEND to muxes"); break;
+        default: flags = 0; break;
+    }
+    if (flags)
+        signal_events_to_muxes_associated_to_socket(socket, flags);
 #endif
 }
 
@@ -847,7 +859,7 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
             goto unlock_and_exit; // Socket limit reached
         }
 
-        tcp_connection_t *connection = tcp_listener_accept(socket->listener, socket2, ready_to_recv, ready_to_send);
+        tcp_connection_t *connection = tcp_listener_accept(socket->listener, socket2, conn_event_callback);
 
 #ifdef MICROTCP_BACKGROUND_THREAD
         while (!connection && !no_block) {
@@ -856,7 +868,7 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
                 push_unlinked_socket_into_free_list(mtcp, socket2);
                 goto unlock_and_exit;
             }
-            connection = tcp_listener_accept(socket->listener, socket2, ready_to_recv, ready_to_send);
+            connection = tcp_listener_accept(socket->listener, socket2, conn_event_callback);
         }
 #else
         if (!connection) {
@@ -916,6 +928,12 @@ size_t microtcp_recv(microtcp_socket_t *socket,
         return 0;
     }
 
+    if (socket->connection == NULL) {
+        if (errcode)
+            *errcode = MICROTCP_ERRCODE_PEERCLOSED;
+        return 0;
+    }
+
     size_t num;
     microtcp_t *mtcp = socket->mtcp;
     microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
@@ -962,6 +980,11 @@ size_t microtcp_send(microtcp_socket_t *socket,
         return 0;
     }
 
+    if (socket->connection == NULL) {
+        if (errcode)
+            *errcode = MICROTCP_ERRCODE_PEERCLOSED;
+        return 0;
+    }
 
     size_t num;
     microtcp_t *mtcp = socket->mtcp;

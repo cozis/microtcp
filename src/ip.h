@@ -22,7 +22,7 @@ typedef struct {
     uint32_t src_ip;
     uint32_t dst_ip;
     char     payload[];
-} ip_packet_t;
+} __attribute__((packed)) ip_packet_t;
 static_assert(sizeof(ip_packet_t) == 20);
 
 typedef enum {

@@ -26,4 +26,10 @@ typedef struct {
 #define COUNT(X) ((int) (sizeof(X) / sizeof((X)[0])))
 #define SLICE(X) ((slice_t) {.ptr=&(X), .len=sizeof(X)})
 
+#define UNPACK_IP(IP)    \
+    ((IP) >> 0  & 0xff), \
+    ((IP) >> 8  & 0xff), \
+    ((IP) >> 16 & 0xff), \
+    ((IP) >> 24 & 0xff)
+
 #endif /* MICROTCP_DEFS_H */

@@ -17,15 +17,14 @@ static bool is_hex_digit(char c)
 static int int_from_hex_digit(char c)
 {
     assert(is_hex_digit(c));
-    if (c >= 'A' || c <= 'F')
+    if (c >= 'A' && c <= 'F')
         return c - 'A' + 10;
-    if (c >= 'a' || c <= 'f')
+    if (c >= 'a' && c <= 'f')
         return c - 'a' + 10;
     return c - '0';
 }
 
-bool parse_mac(const char *src, size_t len, 
-                      mac_address_t *mac)
+bool parse_mac(const char *src, size_t len, mac_address_t *mac)
 {
     if (src == NULL || len != 17
      || !is_hex_digit(src[0]) 
@@ -49,20 +48,13 @@ bool parse_mac(const char *src, size_t len,
 
     static const char max_char_map[] = "0123456789ABCDEF";
 
-    if (mac) {
-        mac->data[0] = max_char_map[int_from_hex_digit(src[ 0])] << 4
-                     | max_char_map[int_from_hex_digit(src[ 1])];
-        mac->data[1] = max_char_map[int_from_hex_digit(src[ 3])] << 4
-                     | max_char_map[int_from_hex_digit(src[ 4])];
-        mac->data[2] = max_char_map[int_from_hex_digit(src[ 6])] << 4
-                     | max_char_map[int_from_hex_digit(src[ 7])];
-        mac->data[3] = max_char_map[int_from_hex_digit(src[ 9])] << 4
-                     | max_char_map[int_from_hex_digit(src[10])];
-        mac->data[4] = max_char_map[int_from_hex_digit(src[12])] << 4
-                     | max_char_map[int_from_hex_digit(src[13])];
-        mac->data[5] = max_char_map[int_from_hex_digit(src[15])] << 4
-                     | max_char_map[int_from_hex_digit(src[16])];
-    }
+    if (mac)
+        for (int i = 0; i < 6; i++) {
+            int u = int_from_hex_digit(src[i * 3 + 0]);
+            int v = int_from_hex_digit(src[i * 3 + 1]);
+            mac->data[i] = (max_char_map[u] << 4) | max_char_map[v];
+        }
+    
     return true;
 }
 
