@@ -1,11 +1,8 @@
 #include <ctype.h>
 #include <stdlib.h> // rand
 #include <string.h>
-
-#ifndef MICROTCP_AMALGAMATION
 #include "utils.h"
 #include "endian.h"
-#endif
 
 static bool is_hex_digit(char c)
 {

@@ -1,10 +1,7 @@
 #include <assert.h>
 #include <stdint.h>
 #include <stddef.h>
-
-#ifndef MICROTCP_AMALGAMATION
 #include "defs.h"
-#endif
 
 #define ARP_MAX_PENDING_REQUESTS 32
 #define ARP_TRANSLATION_TABLE_SIZE 128

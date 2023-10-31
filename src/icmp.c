@@ -1,9 +1,6 @@
 #include <string.h>
-
-#ifndef MICROTCP_AMALGAMATION
 #include "endian.h"
 #include "icmp.h"
-#endif
 
 #ifdef ICMP_DEBUG
 #include <stdio.h>

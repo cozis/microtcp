@@ -1,10 +1,7 @@
 #include <stddef.h>
 #include <stdint.h>
-
-#ifndef MICROTCP_AMALGAMATION
 #include "defs.h"
 #include "tcp_timer.h"
-#endif
 
 #define TCP_TIMEOUT_TIME_WAIT 1000
 //240000

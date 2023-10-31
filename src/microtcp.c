@@ -3,22 +3,14 @@
 #include <string.h> // strerror()
 #include <stdint.h>
 #include <stdlib.h>
-
-#ifndef MICROTCP_AMALGAMATION
-#   include "ip.h"
-#   include "arp.h"
-#   include "tcp.h"
-#   include "utils.h"
-#   include "endian.h"
-#   include "microtcp.h"
-#   ifdef MICROTCP_BACKGROUND_THREAD
-#       include "tinycthread.h"
-#   endif
-#endif
-
-#ifdef MICROTCP_USING_TAP
 #include <tuntap.h>
-#endif
+#include "ip.h"
+#include "arp.h"
+#include "tcp.h"
+#include "utils.h"
+#include "endian.h"
+#include "microtcp.h"
+#include "tinycthread.h"
 
 #ifdef MICROTCP_DEBUG
 #include <stdio.h>
@@ -27,15 +19,7 @@
 #define MICROTCP_DEBUG_LOG(...) do {} while (0);
 #endif
 
-#ifdef MICROTCP_BACKGROUND_THREAD
-#define   LOCK_WHEN_THREADED(mtcp) do {   mtx_lock(&(mtcp)->lock); } while (0);
-#define UNLOCK_WHEN_THREADED(mtcp) do { mtx_unlock(&(mtcp)->lock); } while (0);
-#else
-#define   LOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
-#define UNLOCK_WHEN_THREADED(mtcp) do { (void) (mtcp); } while (0);
-#endif
 
-#ifdef MICROTCP_USING_MUX
 typedef struct mux_entry_t mux_entry_t;
 struct mux_entry_t {
     mux_entry_t **mux_prev;
@@ -53,16 +37,13 @@ struct mux_entry_t {
 
 struct microtcp_mux_t {
     microtcp_t *mtcp;
-#ifdef MICROTCP_BACKGROUND_THREAD
     cnd_t queue_not_empty;
-#endif
     mux_entry_t *free_list;
     mux_entry_t *idle_list;
     mux_entry_t *ready_queue_head;
     mux_entry_t *ready_queue_tail;
     mux_entry_t entries[MICROTCP_MAX_MUX_ENTRIES];
 };
-#endif
 
 typedef struct buffer_t buffer_t;
 struct buffer_t {
@@ -88,7 +69,6 @@ struct microtcp_socket_t {
         tcp_connection_t *connection;
     };
 
-#ifdef MICROTCP_BACKGROUND_THREAD
     union {
         cnd_t something_to_accept;
         struct {
@@ -96,22 +76,17 @@ struct microtcp_socket_t {
             cnd_t something_to_send;
         };
     };
-#endif
 
-#ifdef MICROTCP_USING_MUX
     mux_entry_t *mux_list;
-#endif
 };
 
 struct microtcp_t {
 
     uint64_t last_update_time_ms;
 
-#ifdef MICROTCP_BACKGROUND_THREAD
     bool thread_should_stop;
     thrd_t thread_id;
     mtx_t lock;
-#endif
 
     microtcp_callbacks_t callbacks;
 
@@ -393,9 +368,9 @@ process_packet(microtcp_t *mtcp, const void *packet, size_t len)
 
 void microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len)
 {
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     process_packet(mtcp, packet, len);
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
 }
 
 static uint64_t get_time_in_ms(void)
@@ -419,7 +394,7 @@ void microtcp_step(microtcp_t *mtcp)
 
     uint64_t current_time_ms = get_time_in_ms();
 
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     {
         process_packet(mtcp, packet, size);
         
@@ -432,10 +407,9 @@ void microtcp_step(microtcp_t *mtcp)
             mtcp->last_update_time_ms = current_time_ms;
         }
     }
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
 }
 
-#ifdef MICROTCP_BACKGROUND_THREAD
 static int loop(void *data)
 {
     microtcp_t *mtcp = data;
@@ -443,7 +417,6 @@ static int loop(void *data)
         microtcp_step(mtcp);
     return 0;
 }
-#endif
 
 microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
                                             microtcp_callbacks_t callbacks)
@@ -492,7 +465,7 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
     mtcp->socket_pool[MICROTCP_MAX_SOCKETS-1].mtcp = NULL;
     mtcp->socket_pool[MICROTCP_MAX_SOCKETS-1].prev = NULL;
     mtcp->socket_pool[MICROTCP_MAX_SOCKETS-1].next = NULL;
-
+    
     ip_init(&mtcp->ip_state, parsed_ip, mtcp, send_ip_packet);
     if (!ip_plug_protocol(&mtcp->ip_state, IP_PROTOCOL_TCP, &mtcp->tcp_state, tcp_process_segment_wrapper)) {
         free(mtcp);
@@ -508,9 +481,8 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
     
     use_a_buffer(mtcp);
 
-#ifdef MICROTCP_BACKGROUND_THREAD
     {
-        if (mtx_init(&mtcp->lock, mtx_plain) != thrd_success) {
+        if (mtx_init(&mtcp->lock, mtx_recursive) != thrd_success) {
             ip_free(&mtcp->ip_state);
             arp_free(&mtcp->arp_state);
             tcp_free(&mtcp->tcp_state);
@@ -527,7 +499,6 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
             return NULL;
         }
     }
-#endif
 
     MICROTCP_DEBUG_LOG("Instanciated ("
         "debug="
@@ -536,19 +507,10 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
 #else
         "no"
 #endif
-        ", thread="
-#ifdef MICROTCP_BACKGROUND_THREAD
-        "yes"
-#else
-        "no"
-#endif
         ")");
 
     return mtcp;
 }
-
-
-#ifdef MICROTCP_USING_TAP
 
 static void log_callback_for_tuntap_library(int level, const char *errmsg) 
 {
@@ -622,17 +584,14 @@ microtcp_t *microtcp_create(const char *tap_ip, const char *stack_ip,
         callbacks.free(callbacks.data);
     return mtcp;
 }
-#endif
 
 void microtcp_destroy(microtcp_t *mtcp)
 {
-#ifdef MICROTCP_BACKGROUND_THREAD
     MICROTCP_DEBUG_LOG("Stopping thread");
     mtcp->thread_should_stop = true;
     thrd_join(mtcp->thread_id, NULL);
     mtx_destroy(&mtcp->lock);
     MICROTCP_DEBUG_LOG("Thread stopped");
-#endif
 
     ip_free(&mtcp->ip_state);
     arp_free(&mtcp->arp_state);
@@ -687,30 +646,23 @@ push_unlinked_socket_into_free_list(microtcp_t *mtcp, microtcp_socket_t *socket)
     mtcp->free_socket_list = socket;
 }
 
-#ifdef MICROTCP_USING_MUX
 static void
 signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int events);
-#endif
 
 static void listener_event_callback(void *data, tcp_listenevent_t event)
 {
     microtcp_socket_t *socket = data;
-    (void) socket;
-
-#ifdef MICROTCP_BACKGROUND_THREAD
-    switch (event) {
-        case TCP_LISTENEVENT_ACCEPT: cnd_signal(&socket->something_to_accept); break;
-    }
-#endif
-
-#ifdef MICROTCP_USING_MUX
+    
     int flags = 0;
     switch (event) {
-        case TCP_LISTENEVENT_ACCEPT: flags = MICROTCP_MUX_ACCEPT; MICROTCP_DEBUG_LOG("Signaling ACCEPT to muxes"); break;
+        case TCP_LISTENEVENT_ACCEPT: 
+        cnd_signal(&socket->something_to_accept);
+        flags = MICROTCP_MUX_ACCEPT; 
+        MICROTCP_DEBUG_LOG("Signaling ACCEPT to muxes"); 
+        break;
     }
     if (flags)
         signal_events_to_muxes_associated_to_socket(socket, flags);
-#endif
 }
 
 microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
@@ -718,7 +670,7 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
 {
     microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
     microtcp_socket_t *socket = NULL;
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     {
         socket = pop_socket_struct_from_free_list(mtcp);
         if (!socket) {
@@ -740,23 +692,19 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
         socket->next = NULL;
         socket->type = SOCKET_LISTENER;
         socket->listener = listener;
-
-#ifdef MICROTCP_USING_MUX
         socket->mux_list = NULL;
-#endif
 
-#ifdef MICROTCP_BACKGROUND_THREAD
         if (cnd_init(&socket->something_to_accept) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
             push_unlinked_socket_into_free_list(mtcp, socket);
             tcp_listener_destroy(listener);
             goto unlock_and_exit;
         }
-#endif
+
         push_unlinked_socket_into_used_list(socket);
     }
 unlock_and_exit:
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
     if (errcode)
         *errcode = errcode2;
     return socket;
@@ -769,10 +717,8 @@ void microtcp_close(microtcp_socket_t *socket)
 
     microtcp_t *mtcp = socket->mtcp;
 
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     {
-
-#ifdef MICROTCP_USING_MUX
         // Unregister from all multiplexers
         while (socket->mux_list) {
             // The unregister operation only has 
@@ -783,14 +729,11 @@ void microtcp_close(microtcp_socket_t *socket)
             socket->mux_list->triggered_events = 0;
             microtcp_mux_unregister(socket->mux_list->mux, socket, ~0);
         }
-#endif
 
         switch (socket->type) {
             
             case SOCKET_LISTENER:
-#ifdef MICROTCP_BACKGROUND_THREAD
             cnd_destroy(&socket->something_to_accept);
-#endif
             tcp_listener_destroy(socket->listener);
             break;
                 
@@ -804,38 +747,36 @@ void microtcp_close(microtcp_socket_t *socket)
         unlink_socket_from_used_socket_list(socket);
         push_unlinked_socket_into_free_list(mtcp, socket);
     }
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
 }
 
 static void conn_event_callback(void *data, tcp_connevent_t event)
 {
     microtcp_socket_t *socket = data;
-    (void) socket;
 
-#ifdef MICROTCP_BACKGROUND_THREAD
+    int flags;
     switch (event) {
         
-        case TCP_CONNEVENT_RECV: MICROTCP_DEBUG_LOG("Signal RECV"); cnd_signal(&socket->something_to_recv); break;
-        case TCP_CONNEVENT_SEND: MICROTCP_DEBUG_LOG("Signal SEND"); cnd_signal(&socket->something_to_send); break;
+        case TCP_CONNEVENT_RECV: 
+        MICROTCP_DEBUG_LOG("Signal RECV"); 
+        cnd_signal(&socket->something_to_recv); 
+        flags = MICROTCP_MUX_RECV;
+        break;
+        
+        case TCP_CONNEVENT_SEND: 
+        MICROTCP_DEBUG_LOG("Signal SEND"); 
+        cnd_signal(&socket->something_to_send); 
+        flags = MICROTCP_MUX_SEND;
+        break;
         
         case TCP_CONNEVENT_RESET:
         case TCP_CONNEVENT_CLOSE:
         socket->connection = NULL;
+        flags = 0; // TODO: Maybe signal closing and reset events to muxes?
         break;
-    }
-#endif
-
-#ifdef MICROTCP_USING_MUX
-    // TODO: Maybe signal closing and reset events to muxes?
-    int flags;
-    switch (event) {
-        case TCP_CONNEVENT_RECV: flags = MICROTCP_MUX_RECV; MICROTCP_DEBUG_LOG("Signaling RECV to muxes"); break;
-        case TCP_CONNEVENT_SEND: flags = MICROTCP_MUX_SEND; MICROTCP_DEBUG_LOG("Signaling SEND to muxes"); break;
-        default: flags = 0; break;
     }
     if (flags)
         signal_events_to_muxes_associated_to_socket(socket, flags);
-#endif
 }
 
 microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket, 
@@ -846,7 +787,7 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
     microtcp_t *mtcp = socket->mtcp;
     microtcp_socket_t *socket2 = NULL;
 
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     {
         if (socket->type != SOCKET_LISTENER) {
             errcode2 = MICROTCP_ERRCODE_NOTLISTENER;
@@ -861,7 +802,6 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
 
         tcp_connection_t *connection = tcp_listener_accept(socket->listener, socket2, conn_event_callback);
 
-#ifdef MICROTCP_BACKGROUND_THREAD
         while (!connection && !no_block) {
             if (cnd_wait(&socket->something_to_accept, &mtcp->lock) != thrd_success) {
                 errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
@@ -870,28 +810,14 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
             }
             connection = tcp_listener_accept(socket->listener, socket2, conn_event_callback);
         }
-#else
-        if (!connection) {
-            if (no_block)
-                errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
-            else
-                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-            push_unlinked_socket_into_free_list(mtcp, socket2);
-            goto unlock_and_exit;
-        }
-#endif
 
         socket2->mtcp = mtcp;
         socket2->prev = NULL;
         socket2->next = NULL;
         socket2->type = SOCKET_CONNECTION;
         socket2->connection = connection;
-
-#ifdef MICROTCP_USING_MUX
         socket2->mux_list = NULL;
-#endif
 
-#ifdef MICROTCP_BACKGROUND_THREAD
         if (cnd_init(&socket2->something_to_recv) != thrd_success) {
             errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
             push_unlinked_socket_into_free_list(mtcp, socket2);
@@ -903,13 +829,12 @@ microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket,
             push_unlinked_socket_into_free_list(mtcp, socket2);
             goto unlock_and_exit;
         }
-#endif
 
         push_unlinked_socket_into_used_list(socket2);
     }
 
 unlock_and_exit:
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
 
     if (errcode)
         *errcode = errcode2;
@@ -938,11 +863,10 @@ size_t microtcp_recv(microtcp_socket_t *socket,
     microtcp_t *mtcp = socket->mtcp;
     microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
 
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     {
         num = tcp_connection_recv(socket->connection, dst, len);
 
-#ifdef MICROTCP_BACKGROUND_THREAD
         while (num == 0 && !no_block) {
             if (cnd_wait(&socket->something_to_recv, &mtcp->lock) != thrd_success) {
                 errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
@@ -950,7 +874,7 @@ size_t microtcp_recv(microtcp_socket_t *socket,
             }
             num = tcp_connection_recv(socket->connection, dst, len);
         }
-#endif
+
         if (num == 0) {
             if (no_block)
                 errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
@@ -962,7 +886,7 @@ size_t microtcp_recv(microtcp_socket_t *socket,
     goto unlock_and_exit; // Warning
     unlock_and_exit:
     
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
 
     if (errcode)
         *errcode = errcode2;
@@ -990,11 +914,10 @@ size_t microtcp_send(microtcp_socket_t *socket,
     microtcp_t *mtcp = socket->mtcp;
     microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
 
-    LOCK_WHEN_THREADED(mtcp);
+    mtx_lock(&mtcp->lock);
     {
         num = tcp_connection_send(socket->connection, src, len);
 
-#ifdef MICROTCP_BACKGROUND_THREAD
         while (num == 0 && !no_block) {
             if (cnd_wait(&socket->something_to_send, &mtcp->lock) != thrd_success) {
                 errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
@@ -1002,7 +925,7 @@ size_t microtcp_send(microtcp_socket_t *socket,
             }
             num = tcp_connection_send(socket->connection, src, len);
         }
-#endif
+
         if (num == 0) {
             if (no_block)
                 errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
@@ -1012,14 +935,13 @@ size_t microtcp_send(microtcp_socket_t *socket,
     }
     goto unlock_and_exit; // Warning
     unlock_and_exit:
-    UNLOCK_WHEN_THREADED(mtcp);
+    mtx_unlock(&mtcp->lock);
 
     if (errcode)
         *errcode = errcode2;
     return num;
 }
 
-#ifdef MICROTCP_USING_MUX
 microtcp_mux_t *microtcp_mux_create(microtcp_t *mtcp)
 {
     microtcp_mux_t *mux = malloc(sizeof(microtcp_mux_t));
@@ -1048,12 +970,10 @@ microtcp_mux_t *microtcp_mux_create(microtcp_t *mtcp)
     mux->ready_queue_head = NULL;
     mux->ready_queue_tail = NULL;
 
-#ifdef MICROTCP_BACKGROUND_THREAD
     if (cnd_init(&mux->queue_not_empty) != thrd_success) {
         free(mux);
         return NULL;
     }
-#endif
 
     return mux;
 }
@@ -1084,10 +1004,7 @@ void microtcp_mux_destroy(microtcp_mux_t *mux)
         assert(entry != mux->ready_queue_head);
     }
 
-#ifdef MICROTCP_BACKGROUND_THREAD
     cnd_destroy(&mux->queue_not_empty);
-#endif
-
     free(mux);
 }
 
@@ -1152,7 +1069,7 @@ move_mux_entry_to_idle_list(mux_entry_t *entry)
 
 bool microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int events)
 {
-    LOCK_WHEN_THREADED(mux->mtcp);
+    mtx_lock(&mux->mtcp->lock);
 
     // There's no need to check that mux
     // and socket have the same mtcp because
@@ -1163,7 +1080,7 @@ bool microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int e
     mux_entry_t *entry = find_socket_and_mux_entry(mux, sock);
     if (!entry) {
         // This socket wasn't registered into the mux
-        UNLOCK_WHEN_THREADED(mux->mtcp);
+        mtx_unlock(&mux->mtcp->lock);
         return false;
     }
 
@@ -1184,21 +1101,21 @@ bool microtcp_mux_unregister(microtcp_mux_t *mux, microtcp_socket_t *sock, int e
         // move the entry to the free list.
         move_mux_entry_to_free_list(entry);
 
-    UNLOCK_WHEN_THREADED(mux->mtcp);
+    mtx_unlock(&mux->mtcp->lock);
     return true;
 }
 
 bool microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int events, void *userp)
 {
-    LOCK_WHEN_THREADED(mux->mtcp);
+    mtx_lock(&mux->mtcp->lock);
 
     if (mux->mtcp != sock->mtcp) {
-        UNLOCK_WHEN_THREADED(mux->mtcp);
+        mtx_unlock(&mux->mtcp->lock);
         return false; // mux and socket are associated to different microtcp stacks
     }
 
     if (events == 0) {
-        UNLOCK_WHEN_THREADED(mux->mtcp);
+        mtx_unlock(&mux->mtcp->lock);
         return true; // Nothing to be done
     }
 
@@ -1209,7 +1126,7 @@ bool microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int eve
         if (mux->free_list == NULL) {
             // The entry limit was reached. 
             // It's impossible to register the socket at this time
-            UNLOCK_WHEN_THREADED(mux->mtcp);
+            mtx_unlock(&mux->mtcp->lock);
             return false;
         }
         
@@ -1243,7 +1160,7 @@ bool microtcp_mux_register(microtcp_mux_t *mux, microtcp_socket_t *sock, int eve
 
     entry->events_of_interest |= events;
 
-    UNLOCK_WHEN_THREADED(mux->mtcp);
+    mtx_unlock(&mux->mtcp->lock);
     return true;
 }
 
@@ -1284,19 +1201,15 @@ static bool mux_poll(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
 
 bool microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
 {
-#ifdef MICROTCP_BACKGROUND_THREAD
-    LOCK_WHEN_THREADED(mux->mtcp);
+    mtx_lock(&mux->mtcp->lock);
     while (!mux_poll(mux, ev)) {
         MICROTCP_DEBUG_LOG("Multiplexer waiting for an event");
         if (cnd_wait(&mux->queue_not_empty, &mux->mtcp->lock) != thrd_success)
             abort();
         MICROTCP_DEBUG_LOG("Multiplexer woke up for an event");
     }
-    UNLOCK_WHEN_THREADED(mux->mtcp);
+    mtx_unlock(&mux->mtcp->lock);
     return true;
-#else
-    return mux_poll(mux, ev);
-#endif
 }
 
 static void
@@ -1350,17 +1263,12 @@ signal_events_to_muxes_associated_to_socket(microtcp_socket_t *socket, int event
             entry->mux_next = NULL;
             mux->ready_queue_tail = entry;
 
-#ifdef MICROTCP_BACKGROUND_THREAD
             MICROTCP_DEBUG_LOG("Signaling event to multiplexer");
             if (queue_was_empty)
                 cnd_signal(&mux->queue_not_empty);
             MICROTCP_DEBUG_LOG("Signaled event to multiplexer");
-#else
-            (void) queue_was_empty;
-#endif
         }
         entry = entry->sock_next;
     }
     MICROTCP_DEBUG_LOG("Socket signaled to multiplexers");
 }
-#endif

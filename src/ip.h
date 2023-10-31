@@ -1,11 +1,8 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdbool.h>
-
-#ifndef MICROTCP_AMALGAMATION
 #include "defs.h"
 #include "icmp.h"
-#endif
 
 #define IP_PLUGGED_PROTOCOLS_MAX 4
 

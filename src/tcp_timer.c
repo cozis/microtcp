@@ -1,9 +1,6 @@
 #include <string.h>
 #include <assert.h>
-
-#ifndef MICROTCP_AMALGAMATION
 #include "tcp_timer.h"
-#endif
 
 void tcp_timerset_init(tcp_timerset_t *set)
 {

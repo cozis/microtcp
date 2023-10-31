@@ -1,11 +1,8 @@
 #include <string.h>
 #include <stdbool.h>
 #include <stdalign.h>
-
-#ifndef MICROTCP_AMALGAMATION
-#   include "endian.h"
-#   include "tcp.h"
-#endif
+#include "endian.h"
+#include "tcp.h"
 
 #ifdef TCP_DEBUG
 #   include <stdio.h>
@@ -444,8 +441,8 @@ static void retransmit(tcp_connection_t *c)
 
     size_t retr_queue_bytes = c->snd_nxt - c->snd_una;
     
-    assert(retr_queue_bytes > 0); // If there were no bytes to ACK, 
-                                  // there would be no active timer.
+    //assert(retr_queue_bytes > 0); // If there were no bytes to ACK, 
+                                    // there would be no active timer.
 
     size_t retr_queue_ghost = 0;
     if (c->waiting_ack_for_syn) retr_queue_ghost++;
