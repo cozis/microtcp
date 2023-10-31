@@ -1,10 +1,2 @@
-*.pcapng
-loop2
-loop2.exe
-3p/lib/*
-3p/src/*
-3p/include/*
-build
-*.gcov
-*.gcno
-*.gcda
+out/*
+obj/*

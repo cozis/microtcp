@@ -18,7 +18,9 @@ make
 You'll need both `make` and `cmake` for it to work. If all goes well, you'll find the library files `libtuntap.a`, `libmicrotcp.a` and header files `tuntap.h`, `tuntap-export.h`, `microtcp.h` in `out/`.
 
 ## Usage
-MicroTCP's uses the usual socket interface any network programmer is familiar with, the main difference being you need to esplicitly instanciate the network stack and pass its handle around. Without further ado, here's a simple echo server that shows the basic usage:
+MicroTCP's uses the usual socket interface any network programmer is familiar with, the main difference being you need to explicitly instanciate the network stack and pass its handle around.
+
+Here's a simple echo server that shows the basic usage:
 
 ```c
 #include <microtcp.h>
