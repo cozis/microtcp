@@ -143,15 +143,5 @@ build/microtcp.c: 3p/include/tinycthread.h 3p/src/tinycthread.c $(wildcard src/*
 build/echo_http: examples/microhttp/main.c $(LIBDIR)/libtuntap.a 3p/include/tuntap.h 3p/include/tuntap-export.h build/microtcp.h build/microtcp.c
 	gcc examples/microhttp/main.c examples/microhttp/xhttp.c build/microtcp.c -o $@ $(CFLAGS) $(LFLAGS) -DDEBUG=1 -DARP_DEBUG -DMICROTCP_DEBUG -DIP_DEBUG -DICMP_DEBUG -DTCP_DEBUG -DMICROTCP_USING_MUX
 
-build/test: tests/test.c tests/test_tcp_timer.c src/tcp_timer.c src/tcp_timer.h
-	gcc -fprofile-arcs -ftest-coverage tests/test.c tests/test_tcp_timer.c src/tcp_timer.c -o $@ -Wall -Wextra -DTCP_MAX_TIMERS=4
-
-build/test_arp: tests/test_arp.c
-	gcc tests/test_arp.c -o build/test_arp -Wall -Wextra
-
-report: build/test
-	./build/test
-	gcov -b build/test-tcp_timer.c
-
 clean:
 	rm -fr build 3p/libtuntap/build 3p/lib/* 3p/include/*

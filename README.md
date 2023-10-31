@@ -1,18 +1,13 @@
 # MicroTCP
-Micro TCP is a network stack designed to be easily embeddable, portable and thoroughly tested. It implements ARP, IP, ICMP and TCP. The ideal use-cases are user-space networking and using it in bare-metal microcontrollers.
+MicroTCP is a TCP/IP network stack which I started building as a learning exercise while I was attending the Computer Networking course at the Università degli Studi di Napoli Federico II. It's just a hobby project and is intended to just be a minimal, yet complete, implementation.
+
+At this moment MicroTCP implements ARP (RFC 826, complete), IPv4 (no fragmentation), ICMP (minimum necessary to reply to pings) and TCP (complete but not stress-tested). Note that "complete" should be not intended as "fully compliant" but just as a measure of progress on all of the major features. For instance, it's complete enough to handle HTTP traffic on a local network (Look into examples/microhttp to know more).
+
+## Where does it run?
+MicroTCP can run on Windows and Linux alongside the OS's network stack. To route the network traffic to MicroTCP, the process running it behaves as a virtual host with its own IP address. This is done using a TAP device, which comes built-in on Linux but needs installing on Windows. It should be very easy to adapt to run on microcontrollers but haven't tried yet, the dream is to serve my [blog](https://cozis.github.io/) from an STM32 board.
 
 ## Usage
-To use it, you need to instanciate a `microtcp_t` structure using either the `microtcp_create` or `microtcp_create_using_callbacks` constructor.
-
-The basic constructor `microtcp_create` behaves differently based on your platform because it needs to plug the stack to the system. At the moment it's assumed a Linux host and the instanciated stack is associated to a tap device `tap0` with IP `10.0.0.5/24`. The stack produces packets with IP `10.0.0.4/24` (being honest, this configuration is only useful for testing).
-
-It's also possible to configure the stack explicitly using the `microtcp_create_using_callbacks`, which lets the caller provide the callbacks to input the ethernet frames to the stack and send frames back on the wire. Each system will need it's specific implementation of these callbacks. 
-
-Each instance of MicroTCP (without considering the callbacks) is completely isolated from the others, therefore, if your specific callback implementation allows it, you can have as many instances as you like! Usually the callbacks introduce a dependency between the stacks because the system is one big global state.
-
-Once instanciated, you can free the stack using `microtcp_destroy`.
-
-Once a `microtcp_t` instance is created, you can create and use sockets with methods analogous to the BSD socket API. For instance, here's a simple TCP echo server which replies to messages with the message itself prefixed with "echo: ":
+MicroTCP's uses the usual socket interface any network programmer is familiar with, the main difference being you need to esplicitly instanciate the network stack and pass its handle around. Without further ado, here's a simple echo server that shows the basic usage:
 
 ```c
 #include <microtcp.h>
@@ -45,10 +40,10 @@ int main(void)
 //       If you want to use this code, you probably want to
 //       add some checks!
 ```
+This should be pretty straight forward to understand. One thing may be worth noting is that `microtcp_open` behaves as the BSD's `socket+bind+listen` all at once to setup a listening TCP server. 
 
-## Contributing
-The build result is a header and a .c obtained as an amalgamation of all the source files. Any header included in the source files must be guarded by a `#ifndef MICROTCP_AMALGAMATION`.
+There are more than one way to set up the stack, the main way being `microtcp_create` which creates a virtual network inferface on the host OS with IP 10.0.0.5/24 and a virtual host for the MicroTCP process with the 10.0.0.4/24 IP. You can open Wireshark on the virtual NIC to inspect the traffic between the host and the process.
 
-## Functionalities
-MicroTCP will not support
-* TCP options
+It's also possible to configure the stack using the `microtcp_create_using_callbacks`, which lets you explicitly provide the input L2 frames to it and receive the frames in a buffer. This is how one would run the stack on a microcontroller.
+
+Each instance of MicroTCP (without considering the callbacks) is completely isolated from the others, therefore, if your specific callback implementation allows it, you can have as many instances as you like! Usually the callbacks introduce a dependency between the stacks because the system is one big global state.
