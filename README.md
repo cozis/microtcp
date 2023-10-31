@@ -1,10 +1,10 @@
 # MicroTCP
-MicroTCP is a TCP/IP network stack which I started building as a learning exercise while I was attending the Computer Networking course at the Università degli Studi di Napoli Federico II. It's just a hobby project and is intended to just be a minimal, yet complete, implementation.
+MicroTCP is a TCP/IP network stack I started building as a learning exercise while attending the Computer Networking course at the Università degli Studi di Napoli Federico II. It's just a hobby project and is intended to just be a minimal, yet complete, implementation.
 
-At this moment MicroTCP implements ARP (RFC 826, complete), IPv4 (no fragmentation), ICMP (minimum necessary to reply to pings) and TCP (complete but not stress-tested). Note that "complete" should be not intended as "fully compliant" but just as a measure of progress on all of the major features. For instance, it's complete enough to handle HTTP traffic on a local network (Look into examples/microhttp to know more).
+At this moment MicroTCP implements ARP (RFC 826, complete), IPv4 (no fragmentation), ICMP (minimum necessary to reply to pings) and TCP (complete but not stress-tested). Note that "complete" should not be intended as "fully compliant" but just as a measure of progress on all of the major features. For instance, it's complete enough to handle HTTP traffic on a local network (Look into examples/microhttp to know more).
 
 ## Where does it run?
-MicroTCP can run on Windows and Linux alongside the OS's network stack. To route the network traffic to MicroTCP, the process running it behaves as a virtual host with its own IP address. This is done using a TAP device, which comes built-in on Linux but needs installing on Windows. It should be very easy to adapt to run MicroTCP on microcontrollers but haven't tried yet. The dream is to serve my [blog](https://cozis.github.io/) from an STM32 board!
+MicroTCP can run on Windows and Linux alongside the OS's network stack. To route the network traffic to MicroTCP, the process running it behaves as a virtual host with its own IP address. This is done using a TAP device, which comes built-in on Linux and needs to be installed on Windows. It should be very easy to adapt MicroTCP to run on microcontrollers but haven't tried yet. The dream is to serve my [blog](https://cozis.github.io/) from an STM32 board!
 
 ## Build and Install
 If you are on Windows, you need to install the TAP driver provided by OpenVPN and instanciate a virtual NIC so that MicroTCP can connect to it when started. To build the project from source, make sure you cloned the repository with submodules
