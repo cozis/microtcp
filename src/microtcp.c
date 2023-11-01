@@ -143,7 +143,6 @@ const char *microtcp_strerror(microtcp_errcode_t errcode)
         case MICROTCP_ERRCODE_CANTBLOCK:     return "Can't execute a blocking call for this function";
         case MICROTCP_ERRCODE_WOULDBLOCK:    return "Can't executa e non-blocking call for this function";
         case MICROTCP_ERRCODE_NOTCONNECTION: return "Invalid operation on a non-connection socket";
-        case MICROTCP_ERRCODE_PEERCLOSED:    return "Peer closed the connection";
     }
     return "???";
 }
@@ -159,26 +158,10 @@ typedef struct {
     uint16_t    proto;
 } __attribute__((packed)) ethernet_frame_t;
 
-static_assert(sizeof(ethernet_frame_t) == 14);
-
-#ifdef MICROTCP_DEBUG
-static bool is_valid_buffer_pointer(microtcp_t *mtcp, buffer_t *buffer)
-{
-    for (size_t i = 0; i < MICROTCP_MAX_BUFFERS; i++)
-        if (buffer == mtcp->buffer_pool + i)
-            return true;
-    return false;
-}
-#endif
-
 static void send_arp_packet(void *data, mac_address_t dst)
 {
     microtcp_t *mtcp = data;
     buffer_t *buffer = mtcp->used_buffer;
-
-#ifdef MICROTCP_DEBUG
-    assert(is_valid_buffer_pointer(mtcp, buffer));
-#endif
 
     buffer->used = sizeof(ethernet_frame_t) + sizeof(arp_packet_t);
 
@@ -186,8 +169,6 @@ static void send_arp_packet(void *data, mac_address_t dst)
     frame->dst = dst;
     frame->src = mtcp->mac;
     frame->proto = cpu_to_net_u16(ETHERNET_PROTOCOL_ARP);
-
-    // TODO: What about the CRC?
 
     int n = mtcp->callbacks.send(mtcp->callbacks.data, buffer->data, buffer->used);
     if (n < 0)
@@ -208,12 +189,6 @@ static int send_tcp_segment(void *data, ip_address_t ip,
 static void move_wait_buffer_to_free_list(buffer_t *buffer)
 {
     microtcp_t *mtcp = buffer->mtcp;
-
-#ifdef MICROTCP_DEBUG
-    assert(is_valid_buffer_pointer(mtcp, buffer));
-    assert(buffer->prev == NULL || is_valid_buffer_pointer(mtcp, buffer->prev));
-    assert(buffer->next == NULL || is_valid_buffer_pointer(mtcp, buffer->next));
-#endif
     
     if (buffer->prev)
         buffer->prev->next = buffer->next;
@@ -222,12 +197,6 @@ static void move_wait_buffer_to_free_list(buffer_t *buffer)
 
     if (buffer->next)
         buffer->next->prev = buffer->prev;
-
-#ifdef MICROTCP_DEBUG
-    assert(mtcp->free_buffer_list == NULL || is_valid_buffer_pointer(mtcp, mtcp->free_buffer_list));
-    assert(mtcp->free_buffer_list == NULL || mtcp->free_buffer_list->prev == NULL);
-    assert(mtcp->free_buffer_list == NULL || mtcp->free_buffer_list->next == NULL || is_valid_buffer_pointer(mtcp, mtcp->free_buffer_list->next));
-#endif
 
     buffer->prev = NULL;
     buffer->next = mtcp->free_buffer_list;
@@ -239,11 +208,8 @@ static void mac_resolved(void *data, arp_resolution_status_t status, mac_address
     buffer_t *buffer = data;
     microtcp_t *mtcp = buffer->mtcp;
 
-#ifdef MICROTCP_DEBUG
-    assert(is_valid_buffer_pointer(mtcp, buffer));
-#endif
-
     switch (status) {
+
         case ARP_RESOLUTION_OK:
         {
             ethernet_frame_t *frame = (ethernet_frame_t*) buffer->data;
@@ -255,13 +221,8 @@ static void mac_resolved(void *data, arp_resolution_status_t status, mac_address
         }
         break;
 
-        case ARP_RESOLUTION_FAILED:
-        MICROTCP_DEBUG_LOG("MAC resolution failed");
-        break;
-
-        case ARP_RESOLUTION_TIMEOUT:
-        MICROTCP_DEBUG_LOG("MAC resolution timeout");
-        break;
+        case ARP_RESOLUTION_FAILED:  MICROTCP_DEBUG_LOG("MAC resolution failed");  break;
+        case ARP_RESOLUTION_TIMEOUT: MICROTCP_DEBUG_LOG("MAC resolution timeout"); break;
     }
 
     move_wait_buffer_to_free_list(buffer);
@@ -271,10 +232,6 @@ static void move_used_buffer_to_wait_list(microtcp_t *mtcp)
 {
     buffer_t *buffer = mtcp->used_buffer;
     mtcp->used_buffer = NULL;
-
-#ifdef MICROTCP_DEBUG
-    assert(is_valid_buffer_pointer(mtcp, buffer));
-#endif
 
     buffer->next = mtcp->wait_buffer_list;
     if (mtcp->wait_buffer_list)
@@ -287,13 +244,6 @@ static void move_used_buffer_to_wait_list(microtcp_t *mtcp)
 
 static void use_a_buffer(microtcp_t *mtcp)
 {
-
-#ifdef MIRCOTCP_DEBUG
-    assert(mtcp->free_buffer_list == NULL || is_valid_buffer_pointer(mtcp, mtcp->free_buffer_list));
-    assert(mtcp->free_buffer_list == NULL || mtcp->free_buffer_list->prev == NULL);
-    assert(mtcp->free_buffer_list == NULL || mtcp->free_buffer_list->next == NULL || is_valid_buffer_pointer(mtcp, mtcp->free_buffer_list->next));
-#endif
-
     //  At this moment the network stack has no allocated
     //  output buffer but wants to allocate one (by calling
     //  this function).
@@ -727,7 +677,7 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port)
         push_unlinked_socket_into_free_list(mtcp, socket);
         goto unlock_and_exit;
     }
-    
+
     socket->mtcp = mtcp;
     socket->prev = NULL;
     socket->next = NULL;
@@ -736,7 +686,7 @@ microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port)
     socket->errcode = MICROTCP_ERRCODE_NONE;
     socket->listener = listener;
     socket->mux_list = NULL;
-    
+
     if (cnd_init(&socket->something_to_accept) != thrd_success) {
         mtcp->errcode = MICROTCP_ERRCODE_BADCONDVAR;
         push_unlinked_socket_into_free_list(mtcp, socket);
