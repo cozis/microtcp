@@ -512,11 +512,9 @@ static void req_deinit(xh_request *req)
 
 static conn_t *accept_connection(context_t *ctx)
 {
-    microtcp_errcode_t errcode;
-    microtcp_socket_t *accepted_sock = microtcp_accept(ctx->sock, true, &errcode);
-
-    if(accepted_sock == NULL)
-        return NULL; // Failed to accept.
+    microtcp_socket_t *accepted_sock = microtcp_accept(ctx->sock);
+    if(accepted_sock == NULL) return NULL;
+    microtcp_set_blocking(accepted_sock, false);
 
     if(ctx->freelist == NULL)
     {
@@ -953,11 +951,12 @@ static bool upload(conn_t *conn)
 
         while(sent < total)
         {
-            microtcp_errcode_t errcode;
-            size_t n = microtcp_send(conn->sock, conn->out.data + sent, total - sent, true, &errcode);
-
-            if(n == 0)
+            int n = microtcp_send(conn->sock, conn->out.data + sent, total - sent);
+            if(n <= 0)
             {
+                microtcp_errcode_t errcode = microtcp_get_socket_error(conn->sock);
+                microtcp_clear_socket_error(conn->sock);
+
                 if (errcode == MICROTCP_ERRCODE_WOULDBLOCK)
                     break;
 
@@ -1254,26 +1253,24 @@ static void when_data_is_ready_to_be_read(context_t *ctx, conn_t *conn)
 
             assert(b->size > b->used);
 
-            microtcp_errcode_t errcode;
-            size_t n = microtcp_recv(conn->sock, b->data + b->used, b->size - b->used, true, &errcode);
-            
-            if(n == 0)
+            int n = microtcp_recv(conn->sock, b->data + b->used, b->size - b->used);
+            if (n == 0) {
+                // Peer disconnected.
+                close_connection(ctx, conn);
+                return;
+            }
+
+            if(n < 0)
             {
-                // Peer disconnected or an error occurred
+                microtcp_errcode_t errcode = microtcp_get_socket_error(conn->sock);
+                microtcp_clear_socket_error(conn->sock);
 
                 if(errcode == MICROTCP_ERRCODE_WOULDBLOCK)
                     break; // Done downloading.
-                if (errcode != MICROTCP_ERRCODE_NONE)
-                {
 #ifdef DEBUG
-                    fprintf(stderr, "XHTTP :: %s\n", microtcp_strerror(errcode));
+                fprintf(stderr, "XHTTP :: %s\n", microtcp_strerror(errcode));
 #endif
-                    // An error occurred.
-                    close_connection(ctx, conn);
-                    return;
-                }
-
-                // Peer disconnected.
+                // An error occurred.
                 close_connection(ctx, conn);
                 return;
             }
@@ -1407,31 +1404,23 @@ void xh_quit(xh_handle handle)
     ctx->exiting = 1;
 }
 
-static const char *init(context_t *context, unsigned short port,
-                        microhttp_config_t config)
+static const char *init(context_t *context, unsigned short port)
 {
-    microtcp_callbacks_t callbacks = {
-        .data = config.userp,
-        .free = NULL,
-        .recv = config.recv_frame,
-        .send = config.send_frame,
-    };
-    microtcp_t *mtcp = microtcp_create_using_callbacks(config.ip, config.mac, callbacks);
+    microtcp_t *mtcp = microtcp_create("10.0.0.5", "10.0.0.4", NULL, NULL);
     if (!mtcp)
         return "Failed to initialize TCP";
     context->mtcp = mtcp;
 
-    microtcp_errcode_t errcode;
-
-    context->sock = microtcp_open(mtcp, port, &errcode);
+    context->sock = microtcp_open(mtcp, port);
     if (!context->sock)
-        return microtcp_strerror(errcode);
+        return microtcp_strerror(microtcp_get_error(mtcp));
+    microtcp_set_blocking(context->sock, false);
 
     context->mux = microtcp_mux_create(mtcp);
     if (!context->mux) 
     {
         microtcp_close(context->sock);
-        return microtcp_strerror(errcode);
+        return "Couldn't craete mux";
     }
 
     if (!microtcp_mux_register(context->mux, context->sock, MICROTCP_MUX_ACCEPT, NULL)) 
@@ -1454,27 +1443,23 @@ static const char *init(context_t *context, unsigned short port,
     return NULL;
 }
 
-const char *xhttp(unsigned short port, xh_callback callback, 
-                  void *userp, xh_handle *handle, 
-                  microhttp_config_t config)
+const char *xhttp(unsigned short port, xh_callback callback, xh_handle *handle)
 {
     context_t context;
 
-    const char *error = init(&context, port, config);
+    const char *error = init(&context, port);
 
     if(error != NULL)
         return error;
 
     context.callback = callback;
-    context.userp = userp;
+    context.userp = NULL;
 
     if(handle)
         *handle = &context;
 
     while(!context.exiting)
     {
-        microtcp_step(context.mtcp);
-
         microtcp_muxevent_t ev;
         if (!microtcp_mux_wait(context.mux, &ev))
             continue;

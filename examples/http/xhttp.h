@@ -58,9 +58,7 @@ typedef struct {
 
 typedef void (*xh_callback)(xh_request*, xh_response*, void*);
 
-const char *xhttp(unsigned short port, xh_callback callback, 
-                  void *userp, xh_handle *handle, 
-                  microhttp_config_t config);
+const char *xhttp(unsigned short port, xh_callback callback, xh_handle *handle);
 void        xh_quit(xh_handle handle);
 
 void        xh_header_add(xh_response *res, const char *name, const char *valfmt, ...);
@@ -70,7 +68,6 @@ _Bool       xh_header_cmp(const char *a, const char *b);
 
 int  xh_urlcmp(const char *URL, const char *fmt, ...);
 int xh_vurlcmp(const char *URL, const char *fmt, va_list va);
-
 
 #define xh_string_new(s, l) \
     ((xh_string) { (s), ((int) (l)) < 0 ? (int) strlen(s) : (int) (l) })

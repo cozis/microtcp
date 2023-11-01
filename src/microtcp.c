@@ -1,6 +1,7 @@
-#include <time.h> // time()
+#include <time.h>
 #include <errno.h>
-#include <string.h> // strerror()
+#include <limits.h>
+#include <string.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <tuntap.h>
@@ -18,7 +19,6 @@
 #else
 #define MICROTCP_DEBUG_LOG(...) do {} while (0);
 #endif
-
 
 typedef struct mux_entry_t mux_entry_t;
 struct mux_entry_t {
@@ -63,10 +63,12 @@ struct microtcp_socket_t {
     microtcp_t *mtcp;
     microtcp_socket_t *prev;
     microtcp_socket_t *next;
+    microtcp_errcode_t errcode;
     socket_type_t type;
+    bool block; // If true, operations on this socket will block execution, else they wont
     union {
         tcp_listener_t   *listener;
-        tcp_connection_t *connection;
+        tcp_connection_t *conn;
     };
 
     union {
@@ -83,6 +85,8 @@ struct microtcp_socket_t {
 struct microtcp_t {
 
     uint64_t last_update_time_ms;
+
+    microtcp_errcode_t errcode;
 
     bool thread_should_stop;
     thrd_t thread_id;
@@ -107,10 +111,31 @@ struct microtcp_t {
     microtcp_socket_t socket_pool[MICROTCP_MAX_SOCKETS];
 };
 
+microtcp_errcode_t microtcp_get_error(microtcp_t *mtcp)
+{
+    return mtcp->errcode;
+}
+
+void microtcp_clear_error(microtcp_t *mtcp)
+{
+    mtcp->errcode = MICROTCP_ERRCODE_NONE;
+}
+
+microtcp_errcode_t microtcp_get_socket_error(microtcp_socket_t *sock)
+{
+    return sock->errcode;
+}
+
+void microtcp_clear_socket_error(microtcp_socket_t *sock)
+{
+    sock->errcode = MICROTCP_ERRCODE_NONE;
+}
+
 const char *microtcp_strerror(microtcp_errcode_t errcode)
 {
     switch (errcode) {
         case MICROTCP_ERRCODE_NONE:          return "No error occurred";
+        case MICROTCP_ERRCODE_NOCLEAR:       return "Uncleared error";
         case MICROTCP_ERRCODE_SOCKETLIMIT:   return "Can't create a socket because the socket limit per microtcp instance was reached";
         case MICROTCP_ERRCODE_TCPERROR:      return "An error occurred at the TCP layer";
         case MICROTCP_ERRCODE_BADCONDVAR:    return "Condition variable error";
@@ -366,11 +391,17 @@ process_packet(microtcp_t *mtcp, const void *packet, size_t len)
     }
 }
 
-void microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len)
+bool microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len)
 {
+    if (mtcp->errcode != MICROTCP_ERRCODE_NONE) {
+        mtcp->errcode = MICROTCP_ERRCODE_NOCLEAR;
+        return false;
+    }
+
     mtx_lock(&mtcp->lock);
     process_packet(mtcp, packet, len);
     mtx_unlock(&mtcp->lock);
+    return true;
 }
 
 static uint64_t get_time_in_ms(void)
@@ -380,8 +411,13 @@ static uint64_t get_time_in_ms(void)
     return t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
-void microtcp_step(microtcp_t *mtcp)
+bool microtcp_step(microtcp_t *mtcp)
 {
+    if (mtcp->errcode != MICROTCP_ERRCODE_NONE) {
+        mtcp->errcode = MICROTCP_ERRCODE_NOCLEAR;
+        return false;
+    }
+
     char packet[1024]; // This buffer is the bottleneck for the 
                        // maximum packet size that can be processed.
 
@@ -390,7 +426,7 @@ void microtcp_step(microtcp_t *mtcp)
     // threads the ability to progress in the mean time.
     int size = mtcp->callbacks.recv(mtcp->callbacks.data, packet, sizeof(packet));
     if (size < 0)
-        return;
+        return true;
 
     uint64_t current_time_ms = get_time_in_ms();
 
@@ -408,6 +444,7 @@ void microtcp_step(microtcp_t *mtcp)
         }
     }
     mtx_unlock(&mtcp->lock);
+    return true;
 }
 
 static int loop(void *data)
@@ -438,6 +475,7 @@ microtcp_t *microtcp_create_using_callbacks(const char *ip, const char *mac,
     if (mtcp == NULL)
         return NULL;
 
+    mtcp->errcode = MICROTCP_ERRCODE_NONE;
     mtcp->ip = parsed_ip;
     mtcp->mac = parsed_mac;
     mtcp->callbacks = callbacks;
@@ -665,48 +703,51 @@ static void listener_event_callback(void *data, tcp_listenevent_t event)
         signal_events_to_muxes_associated_to_socket(socket, flags);
 }
 
-microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port,
-                                 microtcp_errcode_t *errcode)
+microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port)
 {
-    microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
+    if (mtcp->errcode != MICROTCP_ERRCODE_NONE) {
+        mtcp->errcode = MICROTCP_ERRCODE_NOCLEAR;
+        return NULL;
+    }
+
     microtcp_socket_t *socket = NULL;
     mtx_lock(&mtcp->lock);
-    {
-        socket = pop_socket_struct_from_free_list(mtcp);
-        if (!socket) {
-            errcode2 = MICROTCP_ERRCODE_SOCKETLIMIT;
-            goto unlock_and_exit; // Socket limit reached
-        }
-        
-        tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, false, socket, listener_event_callback);
-        if (listener == NULL) {
-            // FIXME: This error code should be more specific, 
-            //        but the TCP module isn't stable yet
-            errcode2 = MICROTCP_ERRCODE_TCPERROR;
-            push_unlinked_socket_into_free_list(mtcp, socket);
-            goto unlock_and_exit;
-        }
-
-        socket->mtcp = mtcp;
-        socket->prev = NULL;
-        socket->next = NULL;
-        socket->type = SOCKET_LISTENER;
-        socket->listener = listener;
-        socket->mux_list = NULL;
-
-        if (cnd_init(&socket->something_to_accept) != thrd_success) {
-            errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
-            push_unlinked_socket_into_free_list(mtcp, socket);
-            tcp_listener_destroy(listener);
-            goto unlock_and_exit;
-        }
-
-        push_unlinked_socket_into_used_list(socket);
+    
+    socket = pop_socket_struct_from_free_list(mtcp);
+    if (!socket) {
+        mtcp->errcode = MICROTCP_ERRCODE_SOCKETLIMIT;
+        goto unlock_and_exit; // Socket limit reached
     }
+        
+    tcp_listener_t *listener = tcp_listener_create(&mtcp->tcp_state, port, false, socket, listener_event_callback);
+    if (listener == NULL) {
+        // FIXME: This error code should be more specific, 
+        //        but the TCP module isn't stable yet
+        mtcp->errcode = MICROTCP_ERRCODE_TCPERROR;
+        push_unlinked_socket_into_free_list(mtcp, socket);
+        goto unlock_and_exit;
+    }
+    
+    socket->mtcp = mtcp;
+    socket->prev = NULL;
+    socket->next = NULL;
+    socket->type = SOCKET_LISTENER;
+    socket->block = true;
+    socket->errcode = MICROTCP_ERRCODE_NONE;
+    socket->listener = listener;
+    socket->mux_list = NULL;
+    
+    if (cnd_init(&socket->something_to_accept) != thrd_success) {
+        mtcp->errcode = MICROTCP_ERRCODE_BADCONDVAR;
+        push_unlinked_socket_into_free_list(mtcp, socket);
+        tcp_listener_destroy(listener);
+        goto unlock_and_exit;
+    }
+
+    push_unlinked_socket_into_used_list(socket);
+
 unlock_and_exit:
     mtx_unlock(&mtcp->lock);
-    if (errcode)
-        *errcode = errcode2;
     return socket;
 }
 
@@ -738,9 +779,9 @@ void microtcp_close(microtcp_socket_t *socket)
             break;
                 
             case SOCKET_CONNECTION:
-            if (socket->connection) // Only need to close the connection
+            if (socket->conn) // Only need to close the connection
                                     // if the peer didn't already.
-                tcp_connection_destroy(socket->connection);
+                tcp_connection_destroy(socket->conn);
             break;
         }
 
@@ -771,7 +812,7 @@ static void conn_event_callback(void *data, tcp_connevent_t event)
         
         case TCP_CONNEVENT_RESET:
         case TCP_CONNEVENT_CLOSE:
-        socket->connection = NULL;
+        socket->conn = NULL;
         flags = 0; // TODO: Maybe signal closing and reset events to muxes?
         break;
     }
@@ -779,167 +820,205 @@ static void conn_event_callback(void *data, tcp_connevent_t event)
         signal_events_to_muxes_associated_to_socket(socket, flags);
 }
 
-microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket, 
-                                   bool no_block,
-                                   microtcp_errcode_t *errcode)
+void microtcp_set_blocking(microtcp_socket_t *socket, bool block)
 {
-    microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
+    socket->block = block;
+}
+
+static bool init_conn_socket(microtcp_socket_t *socket, 
+                             microtcp_socket_t *parent, 
+                             tcp_connection_t *conn)
+{
+    socket->mtcp = parent->mtcp;
+    socket->prev = NULL;
+    socket->next = NULL;
+    socket->type = SOCKET_CONNECTION;
+    socket->block = true;
+    socket->conn = conn;
+    socket->errcode = MICROTCP_ERRCODE_NONE;
+    socket->mux_list = NULL;
+    
+    if (cnd_init(&socket->something_to_recv) != thrd_success) {
+        socket->errcode = MICROTCP_ERRCODE_BADCONDVAR;
+        return false;
+    }
+
+    if (cnd_init(&socket->something_to_send) != thrd_success) {
+        socket->errcode = MICROTCP_ERRCODE_BADCONDVAR;
+        cnd_destroy(&socket->something_to_recv);
+        return false;
+    }
+
+    return true;
+}
+
+static microtcp_socket_t *accept_inner(microtcp_socket_t *socket)
+{
     microtcp_t *mtcp = socket->mtcp;
-    microtcp_socket_t *socket2 = NULL;
 
-    mtx_lock(&mtcp->lock);
-    {
-        if (socket->type != SOCKET_LISTENER) {
-            errcode2 = MICROTCP_ERRCODE_NOTLISTENER;
-            goto unlock_and_exit; // Can't accept from a non-listening socket
+    if (socket->errcode != MICROTCP_ERRCODE_NONE) {
+        socket->errcode = MICROTCP_ERRCODE_NOCLEAR;
+        return NULL;
+    }
+
+    if (socket->type != SOCKET_LISTENER) {
+        socket->errcode = MICROTCP_ERRCODE_NOTLISTENER;
+        return NULL; // Can't accept from a non-listening socket
+    }
+
+    microtcp_socket_t *accepted = pop_socket_struct_from_free_list(mtcp);
+    if (!accepted) {
+        socket->errcode = MICROTCP_ERRCODE_SOCKETLIMIT;
+        return NULL; // Socket limit reached
+    }
+
+    tcp_connection_t *conn = tcp_listener_accept(socket->listener, accepted, conn_event_callback);
+    if (conn == NULL) {
+
+        if (!socket->block) {
+            socket->errcode = MICROTCP_ERRCODE_WOULDBLOCK;
+            return NULL;
         }
 
-        socket2 = pop_socket_struct_from_free_list(mtcp);
-        if (!socket2) {
-            errcode2 = MICROTCP_ERRCODE_SOCKETLIMIT;
-            goto unlock_and_exit; // Socket limit reached
-        }
-
-        tcp_connection_t *connection = tcp_listener_accept(socket->listener, socket2, conn_event_callback);
-
-        while (!connection && !no_block) {
+        do {
             if (cnd_wait(&socket->something_to_accept, &mtcp->lock) != thrd_success) {
-                errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
-                push_unlinked_socket_into_free_list(mtcp, socket2);
-                goto unlock_and_exit;
+                socket->errcode = MICROTCP_ERRCODE_BADCONDVAR;
+                push_unlinked_socket_into_free_list(mtcp, accepted);
+                return NULL;
             }
-            connection = tcp_listener_accept(socket->listener, socket2, conn_event_callback);
-        }
-
-        socket2->mtcp = mtcp;
-        socket2->prev = NULL;
-        socket2->next = NULL;
-        socket2->type = SOCKET_CONNECTION;
-        socket2->connection = connection;
-        socket2->mux_list = NULL;
-
-        if (cnd_init(&socket2->something_to_recv) != thrd_success) {
-            errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
-            push_unlinked_socket_into_free_list(mtcp, socket2);
-            goto unlock_and_exit;
-        }
-        if (cnd_init(&socket2->something_to_send) != thrd_success) {
-            errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
-            cnd_destroy(&socket2->something_to_recv);
-            push_unlinked_socket_into_free_list(mtcp, socket2);
-            goto unlock_and_exit;
-        }
-
-        push_unlinked_socket_into_used_list(socket2);
+            conn = tcp_listener_accept(socket->listener, accepted, conn_event_callback);
+        } while (!conn);
     }
 
-unlock_and_exit:
-    mtx_unlock(&mtcp->lock);
+    if (!init_conn_socket(accepted, socket, conn)) {
+        push_unlinked_socket_into_free_list(mtcp, accepted);
+        return NULL;
+    }
 
-    if (errcode)
-        *errcode = errcode2;
-
-    return socket2;
+    push_unlinked_socket_into_used_list(accepted);
+    return accepted;
 }
 
-size_t microtcp_recv(microtcp_socket_t *socket, 
-                     void *dst, size_t len,
-                     bool no_block,
-                     microtcp_errcode_t *errcode)
+microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket)
 {
-    if (!socket || socket->type != SOCKET_CONNECTION) {
-        if (errcode)
-            *errcode = MICROTCP_ERRCODE_NOTCONNECTION;
-        return 0;
-    }
-
-    if (socket->connection == NULL) {
-        if (errcode)
-            *errcode = MICROTCP_ERRCODE_PEERCLOSED;
-        return 0;
-    }
-
-    size_t num;
+    if (!socket)
+        return NULL;
+    microtcp_socket_t *accepted;
     microtcp_t *mtcp = socket->mtcp;
-    microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
-
     mtx_lock(&mtcp->lock);
-    {
-        num = tcp_connection_recv(socket->connection, dst, len);
+    accepted = accept_inner(socket);
+    mtx_unlock(&mtcp->lock);
+    return accepted;
+}
 
-        while (num == 0 && !no_block) {
+static int recv_inner(microtcp_socket_t *socket, 
+                      void *dst, size_t len)
+{
+    microtcp_t *mtcp = socket->mtcp;
+
+    if (socket->errcode != MICROTCP_ERRCODE_NONE) {
+        socket->errcode = MICROTCP_ERRCODE_NOCLEAR;
+        return -1;
+    }
+
+    if (socket->type != SOCKET_CONNECTION) {
+        socket->errcode = MICROTCP_ERRCODE_NOTCONNECTION;
+        return -1;
+    }
+
+    if (socket->conn == NULL)
+        return 0;
+    
+    // Don't read more bytes than the maximum number
+    // representable by an "int" to not overflow the
+    // return value.    
+    if (len > (size_t) INT_MAX) len = INT_MAX;
+
+    size_t num = tcp_connection_recv(socket->conn, dst, len);
+
+    if (num == 0) {
+    
+        if (!socket->block) {
+            socket->errcode = MICROTCP_ERRCODE_WOULDBLOCK;
+            return -1;
+        }
+
+        do {
             if (cnd_wait(&socket->something_to_recv, &mtcp->lock) != thrd_success) {
-                errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
-                goto unlock_and_exit;
+                socket->errcode = MICROTCP_ERRCODE_BADCONDVAR;
+                return -1;
             }
-            num = tcp_connection_recv(socket->connection, dst, len);
-        }
-
-        if (num == 0) {
-            if (no_block)
-                errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
-            else
-                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-        }
+            num = tcp_connection_recv(socket->conn, dst, len);
+        } while (num == 0);
     }
-    
-    goto unlock_and_exit; // Warning
-    unlock_and_exit:
-    
-    mtx_unlock(&mtcp->lock);
 
-    if (errcode)
-        *errcode = errcode2;
-    return num;
+    assert(num <= INT_MAX);
+    return (int) num;
 }
 
-size_t microtcp_send(microtcp_socket_t *socket, 
-                     const void *src, size_t len, 
-                     bool no_block,
-                     microtcp_errcode_t *errcode)
+int microtcp_recv(microtcp_socket_t *socket, 
+                  void *dst, size_t len)
 {
-    if (!socket || socket->type != SOCKET_CONNECTION) {
-        if (errcode) 
-            *errcode = MICROTCP_ERRCODE_NOTCONNECTION;
-        return 0;
-    }
-
-    if (socket->connection == NULL) {
-        if (errcode)
-            *errcode = MICROTCP_ERRCODE_PEERCLOSED;
-        return 0;
-    }
-
-    size_t num;
+    if (!socket)
+        return -1;
+    int res;
     microtcp_t *mtcp = socket->mtcp;
-    microtcp_errcode_t errcode2 = MICROTCP_ERRCODE_NONE;
-
     mtx_lock(&mtcp->lock);
-    {
-        num = tcp_connection_send(socket->connection, src, len);
-
-        while (num == 0 && !no_block) {
-            if (cnd_wait(&socket->something_to_send, &mtcp->lock) != thrd_success) {
-                errcode2 = MICROTCP_ERRCODE_BADCONDVAR;
-                goto unlock_and_exit;
-            }
-            num = tcp_connection_send(socket->connection, src, len);
-        }
-
-        if (num == 0) {
-            if (no_block)
-                errcode2 = MICROTCP_ERRCODE_WOULDBLOCK;
-            else
-                errcode2 = MICROTCP_ERRCODE_CANTBLOCK;
-        }
-    }
-    goto unlock_and_exit; // Warning
-    unlock_and_exit:
+    res = recv_inner(socket, dst, len);
     mtx_unlock(&mtcp->lock);
+    return res;
+}
 
-    if (errcode)
-        *errcode = errcode2;
-    return num;
+static int send_inner(microtcp_socket_t *socket, 
+                      const void *src, size_t len)
+{
+    microtcp_t *mtcp = socket->mtcp;
+
+    if (socket->type != SOCKET_CONNECTION) {
+        socket->errcode = MICROTCP_ERRCODE_NOTCONNECTION;
+        return -1;
+    }
+
+    if (socket->conn == NULL)
+        return 0;
+
+    // As for "recv", never send a number of bytes
+    // bigger than what can be represented by the
+    // return value.
+    if (len > INT_MAX) len = INT_MAX;
+
+    size_t num = tcp_connection_send(socket->conn, src, len);
+    if (num == 0) {
+
+        if (!socket->block) {
+            socket->errcode = MICROTCP_ERRCODE_WOULDBLOCK;
+            return -1;
+        }
+
+        do {
+            if (cnd_wait(&socket->something_to_send, &mtcp->lock) != thrd_success) {
+                socket->errcode = MICROTCP_ERRCODE_BADCONDVAR;
+                return -1;
+            }
+            num = tcp_connection_send(socket->conn, src, len);
+        } while (num == 0);
+    }
+
+    assert(num <= INT_MAX);
+    return (int) num;
+}
+
+int microtcp_send(microtcp_socket_t *socket, 
+                  const void *src, size_t len)
+{
+    if (!socket)
+        return -1;
+    int res;
+    microtcp_t *mtcp = socket->mtcp;
+    mtx_lock(&mtcp->lock);
+    res = send_inner(socket, src, len);
+    mtx_unlock(&mtcp->lock);
+    return res;
 }
 
 microtcp_mux_t *microtcp_mux_create(microtcp_t *mtcp)

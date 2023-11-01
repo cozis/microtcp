@@ -17,6 +17,8 @@ typedef enum {
 
     MICROTCP_ERRCODE_NONE = 0,
 
+    MICROTCP_ERRCODE_NOCLEAR,
+
     // Returned by microtcp_open and microtcp_accept
     MICROTCP_ERRCODE_SOCKETLIMIT,
 
@@ -48,22 +50,30 @@ typedef struct {
 
 bool               microtcp_callbacks_create_for_tap(const char *ip, const char *mac, microtcp_callbacks_t *callbacks);
 microtcp_t        *microtcp_create(const char *tap_ip, const char *stack_ip, const char *tap_mac, const char *stack_mac);
-
 microtcp_t        *microtcp_create_using_callbacks(const char *ip, const char *mac, microtcp_callbacks_t callbacks);
 void               microtcp_destroy(microtcp_t *mtcp);
+microtcp_errcode_t microtcp_get_error(microtcp_t *mtcp);
+void               microtcp_clear_error(microtcp_t *mtcp);
+
+microtcp_errcode_t microtcp_get_socket_error(microtcp_socket_t *sock);
+void               microtcp_clear_socket_error(microtcp_socket_t *sock);
+
 const char        *microtcp_strerror(microtcp_errcode_t errcode);
-microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port, microtcp_errcode_t *errcode);
-microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket, bool no_block, microtcp_errcode_t *errcode);
+microtcp_socket_t *microtcp_open(microtcp_t *mtcp, uint16_t port);
+microtcp_socket_t *microtcp_accept(microtcp_socket_t *socket);
 void               microtcp_close(microtcp_socket_t *socket);
-size_t             microtcp_send(microtcp_socket_t *socket, const void *src, size_t len, bool no_block, microtcp_errcode_t *errcode);
-size_t             microtcp_recv(microtcp_socket_t *socket,       void *dst, size_t len, bool no_block, microtcp_errcode_t *errcode);
-void               microtcp_step(microtcp_t *mtcp);
-void               microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len);
+
+int                microtcp_send(microtcp_socket_t *socket, const void *src, size_t len);
+int                microtcp_recv(microtcp_socket_t *socket, void *dst, size_t len);
+
+bool               microtcp_step(microtcp_t *mtcp);
+void               microtcp_set_blocking(microtcp_socket_t *socket, bool block);
+bool               microtcp_process_packet(microtcp_t *mtcp, const void *packet, size_t len);
 
 typedef enum {
-    MICROTCP_MUX_ACCEPT = 1,
-    MICROTCP_MUX_RECV   = 2,
-    MICROTCP_MUX_SEND   = 4,
+    MICROTCP_MUX_ACCEPT = 1 << 0,
+    MICROTCP_MUX_RECV   = 1 << 1,
+    MICROTCP_MUX_SEND   = 1 << 2,
 } microtcp_muxeventid_t;
 
 typedef struct {
