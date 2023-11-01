@@ -27,20 +27,29 @@ Here's a simple echo server that shows the basic usage:
 
 int main(void)
 {
-    microtcp_t *mtcp = microtcp_create();
-    
-    uint16_t port = 80;
-    microtcp_socket_t *server = microtcp_open(mtcp, port, NULL);
-    
+    microtcp_t *mtcp = microtcp_create("10.0.0.5", "10.0.0.4", NULL, NULL);
+    if (mtcp == NULL)
+        return -1; // Couldn't create MicroTCP instance
+
+    uint16_t port = 8081;
+    microtcp_socket_t *server = microtcp_open(mtcp, port);
+    if (server == NULL) {
+        microtcp_destroy(mtcp);
+        return -1;
+    }
+
     while (1) {
-
-        microtcp_socket_t *client = microtcp_accept(server, false, NULL);
-
+    
+        microtcp_socket_t *client = microtcp_accept(server);
+        if (client == NULL)
+            break;
+        
         char buffer[1024];
-        size_t num = microtcp_recv(client, buffer, sizeof(buffer), NULL);
-        microtcp_send(client, "echo: ", 6, NULL);
-        microtcp_send(client, buffer, num, NULL);
-
+        int num = microtcp_recv(client, buffer, sizeof(buffer));
+        if (num > 0) {
+            microtcp_send(client, "echo: ", 6);
+            microtcp_send(client, buffer, num);
+        }
         microtcp_close(client);
     }
     
@@ -48,10 +57,6 @@ int main(void)
     microtcp_destroy(mtcp);
     return 0;
 }
-
-// NOTE: Errors checks were omitted for readability's sake.
-//       If you want to use this code, you probably want to
-//       add some checks!
 ```
 This should be pretty straight forward to understand. One thing may be worth noting is that `microtcp_open` behaves as the BSD's `socket+bind+listen` all at once to setup a listening TCP server. 
 
