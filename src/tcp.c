@@ -1197,7 +1197,7 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
             //   and that SND.WL2 records the acknowledgment number of the last 
             //   segment used to update SND.WND. The check here prevents using 
             //   old segments to update the window.
-            TCP_DEBUG_LOG("ack=%lld, UNA=%lld, NXT=%lld", ack, c->snd_una, c->snd_nxt);
+            
             if (ack > c->snd_nxt) {
                 // Peer acked something not sent yet
                 transmit(c, TCP_FLAG_ACK, true);
@@ -1261,7 +1261,7 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
                 //   In addition to the processing for the ESTABLISHED state, if the 
                 //   ACK acknowledges our FIN, then enter the TIME-WAIT state; 
                 //   otherwise, ignore the segment.
-                TCP_DEBUG_LOG("ACK with seq=%lld, ack=%lld reached here (NXT=%lld)", seq, ack, c->snd_nxt);
+                
                 if (ack == c->snd_nxt) {
                     TCP_DEBUG_LOG("And here");
                     // Everything was ACKed, so if a FIN was sent that was ACKed too.

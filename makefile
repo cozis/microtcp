@@ -81,5 +81,5 @@ $(EXAMPLE_1): lib $(EXAMPLE_CFILES_1) $(EXAMPLE_HFILES_1)
 	$(CC) -o $@ $(EXAMPLE_CFILES_1) $(CFLAGS) $(EXAMPLE_LFLAGS) -I$(OUTDIR) -L$(OUTDIR)
 
 clean:
-	rm -fr $(OBJDIR) $(OUTDIR)
+	rm -fr $(OBJDIR) $(OUTDIR) 3p/libtuntap/build
 	mkdir obj out
