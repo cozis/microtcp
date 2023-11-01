@@ -187,9 +187,7 @@ struct tcp_connection_t {
     uint32_t snd_wl2; // SND.WL2 from RFC 9293
                       // segment acknowledgment number used for 
                       // last window update.
-
-    uint32_t last_acked; // Last sequence number of the peer that was ACKed
-
+    
     // If true, the next segment which will empty the
     // output buffer will contain a FIN.
     bool send_fin_when_fully_flushed;

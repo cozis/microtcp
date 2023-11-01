@@ -5,6 +5,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <tuntap.h>
+
 #include "ip.h"
 #include "arp.h"
 #include "tcp.h"
@@ -111,6 +112,17 @@ struct microtcp_t {
     microtcp_socket_t socket_pool[MICROTCP_MAX_SOCKETS];
 };
 
+typedef enum {
+    ETHERNET_PROTOCOL_ARP = 0x0806,
+    ETHERNET_PROTOCOL_IP  = 0x0800,
+} ethernet_protocol_t;
+
+typedef struct {
+    mac_address_t dst;
+    mac_address_t src;
+    uint16_t    proto;
+} __attribute__((packed)) ethernet_frame_t;
+
 microtcp_errcode_t microtcp_get_error(microtcp_t *mtcp)
 {
     return mtcp->errcode;
@@ -146,17 +158,6 @@ const char *microtcp_strerror(microtcp_errcode_t errcode)
     }
     return "???";
 }
-
-typedef enum {
-    ETHERNET_PROTOCOL_ARP = 0x0806,
-    ETHERNET_PROTOCOL_IP  = 0x0800,
-} ethernet_protocol_t;
-
-typedef struct {
-    mac_address_t dst;
-    mac_address_t src;
-    uint16_t    proto;
-} __attribute__((packed)) ethernet_frame_t;
 
 static void send_arp_packet(void *data, mac_address_t dst)
 {
@@ -326,13 +327,8 @@ process_packet(microtcp_t *mtcp, const void *packet, size_t len)
     
     switch (net_to_cpu_u16(frame->proto)) {
 
-        case ETHERNET_PROTOCOL_ARP:
-        arp_process_packet(&mtcp->arp_state, frame+1, len - sizeof(ethernet_frame_t)); 
-        break;
-        
-        case ETHERNET_PROTOCOL_IP:
-        ip_process_packet(&mtcp->ip_state, frame+1, len - sizeof(ethernet_frame_t)); 
-        break;
+        case ETHERNET_PROTOCOL_ARP: arp_process_packet(&mtcp->arp_state, frame+1, len - sizeof(ethernet_frame_t)); break;
+        case ETHERNET_PROTOCOL_IP :  ip_process_packet(&mtcp->ip_state,  frame+1, len - sizeof(ethernet_frame_t)); break;
 
         default:
         // Unsupported ethertype
@@ -745,7 +741,7 @@ static void conn_event_callback(void *data, tcp_connevent_t event)
 {
     microtcp_socket_t *socket = data;
 
-    int flags;
+    int flags = 0;
     switch (event) {
         
         case TCP_CONNEVENT_RECV: 
@@ -760,10 +756,14 @@ static void conn_event_callback(void *data, tcp_connevent_t event)
         flags = MICROTCP_MUX_SEND;
         break;
         
-        case TCP_CONNEVENT_RESET:
-        case TCP_CONNEVENT_CLOSE:
+        case TCP_CONNEVENT_RESET: 
+        MICROTCP_DEBUG_LOG("Signal RESET"); 
         socket->conn = NULL;
-        flags = 0; // TODO: Maybe signal closing and reset events to muxes?
+        break;
+        
+        case TCP_CONNEVENT_CLOSE: 
+        MICROTCP_DEBUG_LOG("Signal CLOSE"); 
+        socket->conn = NULL;
         break;
     }
     if (flags)
@@ -1234,7 +1234,7 @@ bool microtcp_mux_wait(microtcp_mux_t *mux, microtcp_muxevent_t *ev)
     while (!mux_poll(mux, ev)) {
         MICROTCP_DEBUG_LOG("Multiplexer waiting for an event");
         if (cnd_wait(&mux->queue_not_empty, &mux->mtcp->lock) != thrd_success)
-            abort();
+            abort(); // FIXME: Shouldn't just abort like this
         MICROTCP_DEBUG_LOG("Multiplexer woke up for an event");
     }
     mtx_unlock(&mux->mtcp->lock);

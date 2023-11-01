@@ -97,7 +97,6 @@ connection_create(tcp_listener_t *listener, ip_address_t ip, uint16_t port, uint
     c->snd_nxt = seq;
     c->snd_wl1 = seq;
     c->snd_wl2 = ack;
-    c->last_acked = 0;
     c->oused = 0;
     c->waiting_ack_for_syn = false;
     c->waiting_ack_for_fin = false;
@@ -292,9 +291,6 @@ static void transmit_rst(tcp_connection_t *c, bool ack)
         .payload = SLICE_EMPTY,
     };
     transmit_basic(tcp, config);
-
-    if (flags & TCP_FLAG_ACK)
-        c->last_acked = c->rcv_nxt;
 }
 
 #ifdef TCP_DEBUG
@@ -329,14 +325,6 @@ static void transmit_(tcp_connection_t *c, uint8_t flags, bool no_payload
 
     tcp_listener_t *listener = c->listener;
     tcp_state_t    *tcp = listener->state;
-
-    if (flags == TCP_FLAG_ACK && no_payload) {
-        // The peer is requesting a segment just containing an ACK
-        // If there are no additional bytes to ACK, ignore the
-        // transmission request.
-        if (c->last_acked == c->rcv_nxt)
-            return;
-    }
 
     bool ack = flags & TCP_FLAG_ACK;
 
@@ -412,9 +400,6 @@ static void transmit_(tcp_connection_t *c, uint8_t flags, bool no_payload
         c->waiting_ack_for_syn = true;
     }
 
-    if (flags & TCP_FLAG_ACK)
-        c->last_acked = c->rcv_nxt;
-
     // Restart the retransmission timer if necessary
     if (c->snd_una < c->snd_nxt) {
 
@@ -436,6 +421,7 @@ static void transmit_(tcp_connection_t *c, uint8_t flags, bool no_payload
 
 static void retransmit(tcp_connection_t *c)
 {
+    TCP_DEBUG_LOG("Retransmitting");
     tcp_listener_t *listener = c->listener;
     tcp_state_t    *tcp = listener->state;
 
@@ -1211,7 +1197,7 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
             //   and that SND.WL2 records the acknowledgment number of the last 
             //   segment used to update SND.WND. The check here prevents using 
             //   old segments to update the window.
-
+            TCP_DEBUG_LOG("ack=%lld, UNA=%lld, NXT=%lld", ack, c->snd_una, c->snd_nxt);
             if (ack > c->snd_nxt) {
                 // Peer acked something not sent yet
                 transmit(c, TCP_FLAG_ACK, true);
@@ -1275,8 +1261,9 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
                 //   In addition to the processing for the ESTABLISHED state, if the 
                 //   ACK acknowledges our FIN, then enter the TIME-WAIT state; 
                 //   otherwise, ignore the segment.
-
+                TCP_DEBUG_LOG("ACK with seq=%lld, ack=%lld reached here (NXT=%lld)", seq, ack, c->snd_nxt);
                 if (ack == c->snd_nxt) {
+                    TCP_DEBUG_LOG("And here");
                     // Everything was ACKed, so if a FIN was sent that was ACKed too.
                     transition_to_time_wait(c);
                 }
@@ -1350,8 +1337,8 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
             {
                 size_t num = move_data_into_input_buffer(c, payload);
                 if (num > 0) {
-                    if (c->cb_event) c->cb_event(c->cb_data, TCP_CONNEVENT_RECV);
                     transmit(c, TCP_FLAG_ACK, false);
+                    if (c->cb_event) c->cb_event(c->cb_data, TCP_CONNEVENT_RECV);
                 }
             }
             break;
