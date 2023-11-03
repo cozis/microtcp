@@ -5,10 +5,30 @@
 #include "tcp.h"
 
 #ifdef TCP_DEBUG
-#   include <stdio.h>
-#   define TCP_DEBUG_LOG(fmt, ...) fprintf(stderr, "TCP :: " fmt "\n", ## __VA_ARGS__)
+#include <stdio.h>
+#define TCP_DEBUG_LOG(fmt, ...) fprintf(stderr, "TCP :: " fmt "\n", ## __VA_ARGS__)
 #else
-#   define TCP_DEBUG_LOG(...) {}
+#define TCP_DEBUG_LOG(...) {}
+#endif
+
+#ifdef TCP_DEBUG
+#define TCP_DEBUG_LOCATION_ARG(F, L) , const char *F, int L
+#define TCP_DEBUG_LOCATION_PUT(F, L) , (F), (L)
+#else
+#define TCP_DEBUG_LOCATION_ARG(F, L)
+#define TCP_DEBUG_LOCATION_PUT(F, L)
+#endif
+
+#ifdef TCP_DEBUG
+#define transmit(c, flags, no_payload) transmit_((c), (flags), (no_payload), __FILE__, __LINE__)
+#else
+#define transmit transmit_
+#endif
+
+#ifdef TCP_DEBUG
+#define retransmit(c) retransmit_((c), __FILE__, __LINE__)
+#else
+#define retransmit retransmit_
 #endif
 
 #define SLICE_EMPTY ((slice_t) {.ptr=NULL, .len=0})
@@ -87,6 +107,9 @@ connection_create(tcp_listener_t *listener, ip_address_t ip, uint16_t port, uint
     c->state = TCP_STATE_CLOSED;
     c->peer_port = port;
     c->peer_ip   = ip;
+#ifdef TCP_DEBUG
+    c->init_peer_seq = ack-1;
+#endif
     c->retr_timer = NULL;
     c->wait_timer = NULL;
     c->rcv_unread = ack;
@@ -123,13 +146,16 @@ static uint32_t choose_sequence_no(void)
     return 0;
 }
 
-static void retransmit(tcp_connection_t *c);
+static void retransmit_(tcp_connection_t *c TCP_DEBUG_LOCATION_ARG(file, line));
 
 static void retr_timeout_callback(void *data)
 {
     tcp_connection_t *c = data;
     tcp_listener_t   *l = c->listener;
     tcp_state_t *tcp = l->state;
+    assert(c->retr_timer);
+    TCP_DEBUG_LOG("Retransmission timer %ld triggered", c->retr_timer - tcp->timers.pool);
+    c->retr_timer = NULL;
 
     retransmit(c);
 
@@ -243,9 +269,56 @@ transmit_bytes(tcp_state_t *tcp, ip_address_t ip,
     return tcp->callbacks.send(tcp->callbacks.data, ip, slices, COUNT(slices));
 }
 
-static int transmit_basic(tcp_state_t *tcp, transmit_config_t config)
+#ifdef TCP_DEBUG
+static void print_segment(uint64_t time_ms, tcp_segment_t header, slice_t payload, uint32_t init_peer_seq, bool recv, const char *file, int line)
+{
+    char flags[300];
+    int  flnum = 0;
+    if (header.flags & TCP_FLAG_FIN) {
+        if (flnum > 0) flags[flnum++] = '|';
+        flnum += snprintf(flags + flnum, sizeof(flags) - flnum, "FIN");
+    }
+    if (header.flags & TCP_FLAG_SYN) {
+        if (flnum > 0) flags[flnum++] = '|';
+        flnum += snprintf(flags + flnum, sizeof(flags) - flnum, "SYN");
+    }
+    if (header.flags & TCP_FLAG_RST) {
+        if (flnum > 0) flags[flnum++] = '|';
+        flnum += snprintf(flags + flnum, sizeof(flags) - flnum, "RST");
+    }
+    if (header.flags & TCP_FLAG_PUSH) {
+        if (flnum > 0) flags[flnum++] = '|';
+        flnum += snprintf(flags + flnum, sizeof(flags) - flnum, "PUSH");
+    }
+    if (header.flags & TCP_FLAG_ACK) {
+        if (flnum > 0) flags[flnum++] = '|';
+        flnum += snprintf(flags + flnum, sizeof(flags) - flnum, "ACK");
+    }
+    if (header.flags & TCP_FLAG_URG) {
+        if (flnum > 0) flags[flnum++] = '|';
+        flnum += snprintf(flags + flnum, sizeof(flags) - flnum, "URG");
+    }
+    flags[flnum] = '\0';
+
+    TCP_DEBUG_LOG("%s %ld { %d -> %d | seq=%u, ack=%u, payload=%d, flags=%s } -- %s:%d",
+        recv ? "=>" : "<=", time_ms,
+        net_to_cpu_u16(header.src_port), 
+        net_to_cpu_u16(header.dst_port),
+        net_to_cpu_u32(header.seq_no) - (recv ? init_peer_seq : 0),
+        net_to_cpu_u32(header.ack_no) - (recv ? 0 : init_peer_seq),
+        (int) payload.len, flags,
+        file, line);
+}
+#endif
+
+static int transmit_basic(tcp_state_t *tcp, transmit_config_t config,
+                          uint32_t init_peer_seq
+                          TCP_DEBUG_LOCATION_ARG(file, line))
 {
     tcp_segment_t header = compile_segment(config);
+#ifdef TCP_DEBUG
+    print_segment(tcp->timers.current_time_ms, header, config.payload, init_peer_seq, false, file, line);
+#endif
     return transmit_bytes(tcp, config.peer, header, config.payload);
 }
 
@@ -266,7 +339,7 @@ static void transmit_reply_rst(tcp_state_t *tcp, ip_address_t receiver,
         .window = 0,
         .payload = SLICE_EMPTY,
     };
-    transmit_basic(tcp, config);
+    transmit_basic(tcp, config, 0 TCP_DEBUG_LOCATION_PUT(__FILE__, __LINE__));
 }
 
 static void transmit_rst(tcp_connection_t *c, bool ack)
@@ -290,38 +363,17 @@ static void transmit_rst(tcp_connection_t *c, bool ack)
         .window = c->rcv_wnd,
         .payload = SLICE_EMPTY,
     };
-    transmit_basic(tcp, config);
-}
-
+    uint32_t init_peer_seq = 0;
 #ifdef TCP_DEBUG
-#define TCP_DEBUG_LOCATION(F, L) , const char *F, int L
-#else
-#define TCP_DEBUG_LOCATION(F, L)
+    init_peer_seq = c->init_peer_seq;
 #endif
-
-static const char *flags_to_str(uint8_t flags)
-{
-    switch (flags) {
-
-        case TCP_FLAG_ACK: return "ACK";
-        case TCP_FLAG_FIN: return "FIN";
-        case TCP_FLAG_SYN: return "SYN";
-        case TCP_FLAG_RST: return "RST";
-        case TCP_FLAG_URG: return "URG";
-
-        case TCP_FLAG_FIN | TCP_FLAG_ACK: return "FIN|ACK";
-        case TCP_FLAG_SYN | TCP_FLAG_ACK: return "SYN|ACK";
-        case TCP_FLAG_RST | TCP_FLAG_ACK: return "RST|ACK";
-        
-        default: return "?";
-    }
-
+    transmit_basic(tcp, config, init_peer_seq TCP_DEBUG_LOCATION_PUT(__FILE__, __LINE__));
 }
 
 static void transmit_(tcp_connection_t *c, uint8_t flags, bool no_payload 
-                      TCP_DEBUG_LOCATION(file, line)) 
+                      TCP_DEBUG_LOCATION_ARG(file, line)) 
 {
-    TCP_DEBUG_LOG("transmit(flags=%s, no_payload=%s) at %s:%d", flags_to_str(flags), no_payload ? "true" : "false", file, line);
+    //TCP_DEBUG_LOG("transmit(flags=%s, no_payload=%s) at %s:%d", flags_to_str(flags), no_payload ? "true" : "false", file, line);
 
     tcp_listener_t *listener = c->listener;
     tcp_state_t    *tcp = listener->state;
@@ -383,7 +435,11 @@ static void transmit_(tcp_connection_t *c, uint8_t flags, bool no_payload
         .window = c->rcv_wnd,
         .payload = payload,
     };
-    transmit_basic(tcp, config);
+    uint32_t init_peer_seq = 0;
+#ifdef TCP_DEBUG
+    init_peer_seq = c->init_peer_seq;
+#endif
+    transmit_basic(tcp, config, init_peer_seq TCP_DEBUG_LOCATION_PUT(file, line));
 
     c->snd_nxt += payload.len;
 
@@ -413,13 +469,7 @@ static void transmit_(tcp_connection_t *c, uint8_t flags, bool no_payload
     }
 }
 
-#ifdef TCP_DEBUG
-#define transmit(c, flags, no_payload) transmit_((c), (flags), (no_payload), __FILE__, __LINE__)
-#else
-#define transmit transmit_
-#endif
-
-static void retransmit(tcp_connection_t *c)
+static void retransmit_(tcp_connection_t *c TCP_DEBUG_LOCATION_ARG(file, line))
 {
     TCP_DEBUG_LOG("Retransmitting");
     tcp_listener_t *listener = c->listener;
@@ -427,8 +477,8 @@ static void retransmit(tcp_connection_t *c)
 
     size_t retr_queue_bytes = c->snd_nxt - c->snd_una;
     
-    //assert(retr_queue_bytes > 0); // If there were no bytes to ACK, 
-                                    // there would be no active timer.
+    assert(retr_queue_bytes > 0); // If there were no bytes to ACK, 
+                                  // there would be no active timer.
 
     size_t retr_queue_ghost = 0;
     if (c->waiting_ack_for_syn) retr_queue_ghost++;
@@ -464,7 +514,11 @@ static void retransmit(tcp_connection_t *c)
         .window = c->rcv_wnd,
         .payload = payload,
     };
-    transmit_basic(tcp, config);
+    uint32_t init_peer_seq = 0;
+#ifdef TCP_DEBUG
+    init_peer_seq = c->init_peer_seq;
+#endif
+    transmit_basic(tcp, config, init_peer_seq TCP_DEBUG_LOCATION_PUT(file, line));
 }
 
 static void forget_acked(tcp_connection_t *c, uint32_t ack)
@@ -815,7 +869,7 @@ state_listen(tcp_listener_t *listener, ip_address_t sender,
 
         transmit(c, TCP_FLAG_SYN | TCP_FLAG_ACK, true);
         c->state = TCP_STATE_SYN_RCVD;
-        
+
         // Complete the processing in the SYN-RCVD state, but
         // don't repeat the SYN and ACK should not be repeated
         unset(seg, TCP_FLAG_SYN | TCP_FLAG_ACK);
@@ -888,7 +942,7 @@ static void transition_to_time_wait(tcp_connection_t *c)
         c->retr_timer = NULL;
     }
 
-    size_t ms = 60;
+    size_t ms = 60; // FIXME: Should be in milliseconds
     c->wait_timer = tcp_timer_create(&tcp->timers, ms, "wait", wait_timeout_callback, c);
     if (c->wait_timer == NULL) {
         // Couldn't set the TIME-WAIT timer
@@ -916,6 +970,10 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
     // it's marked as closed (as in "listener->closed = true"), then
     // already established connections are ok but new ones are not so
     // the listener should be regarded as in the CLOSED state.
+
+#ifdef TCP_DEBUG
+    print_segment(tcp->timers.current_time_ms, *segment, payload, c ? c->init_peer_seq : 0, true, __FILE__, __LINE__);
+#endif
 
     if (listener == NULL)
         connstate = TCP_STATE_CLOSED; // Not listening on destination port
@@ -1263,7 +1321,6 @@ void tcp_process_segment(tcp_state_t *tcp, ip_address_t sender,
                 //   otherwise, ignore the segment.
                 
                 if (ack == c->snd_nxt) {
-                    TCP_DEBUG_LOG("And here");
                     // Everything was ACKed, so if a FIN was sent that was ACKed too.
                     transition_to_time_wait(c);
                 }

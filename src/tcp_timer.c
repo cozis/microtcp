@@ -2,9 +2,16 @@
 #include <assert.h>
 #include "tcp_timer.h"
 
+
+#ifdef TCP_DEBUG
+#include <stdio.h>
+#define TCP_DEBUG_LOG(fmt, ...) fprintf(stderr, "TCP-TIMERS :: " fmt "\n", ## __VA_ARGS__)
+#else
+#define TCP_DEBUG_LOG(...) {}
+#endif
+
 void tcp_timerset_init(tcp_timerset_t *set)
 {
-    static_assert(TCP_MAX_TIMERS >= 0);
     if (TCP_MAX_TIMERS == 0)
         set->free_list = NULL;
     else {
@@ -26,6 +33,8 @@ void tcp_timer_disable(tcp_timer_t *timer)
 {
     tcp_timerset_t *set = timer->set;
 
+    TCP_DEBUG_LOG("Timer %d disabled", (int) (timer - set->pool));
+
     // Pop the timer from the used list
     if (timer->prev)
         timer->prev->next = timer->next;
@@ -46,12 +55,12 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms,
 {
     assert(callback);
 
-    if (set->free_list == NULL)
+    tcp_timer_t *timer = set->free_list;
+    if (timer == NULL)
         // Out of timers! This is really bad.
         // What can be done to mitigate this?
         return NULL;
 
-    tcp_timer_t *timer = set->free_list;
     set->free_list = timer->next;
     // NOTE: Since the free list is singly linked, there's
     //       no need to change the prev member of the new
@@ -78,6 +87,7 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms,
         timer->prev = NULL;
         timer->next = set->used_list;
         set->used_list->prev = timer;
+        set->used_list = timer;
     } else {
         // The timer isn't the first of the list. We need to
         // determine at which position it should be inserted
@@ -95,11 +105,13 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms,
             // come after. Since we know the inserted item won't
             // be the first, then this one isn't the first element
             // of the list either, so its "prev" isn't NULL.
+            assert(cursor != set->used_list);
             assert(cursor->prev);
             timer->prev = cursor->prev;
             timer->next = cursor;
             cursor->prev->next = timer;
             cursor->prev = timer;
+
         } else {
             // No element that needs to come after was found,
             // so its position should be the last.
@@ -108,6 +120,7 @@ tcp_timer_t *tcp_timer_create(tcp_timerset_t *set, size_t ms,
             timer->next = NULL;
         }
     }
+    TCP_DEBUG_LOG("Timer %d created (%s)", (int) (timer - set->pool), name);
     return timer;
 }
 
@@ -131,7 +144,8 @@ void tcp_timerset_step(tcp_timerset_t *set, size_t ms)
             // timed out timeout was the previous one.
             break;
         
-        // Trigger the callback
+        TCP_DEBUG_LOG("Timer %d triggered (deadline %d, current %d, set_time=%d, trg_time=%d)", (int) (timeout - set->pool), (int) timeout->deadline, (int) set->current_time_ms, (int) timeout->set_time, (int) timeout->trg_time);
+        
         timeout->callback(timeout->data);
 
         timedout_tail = timeout;

@@ -129,6 +129,10 @@ struct tcp_connection_t {
     tcp_timer_t *retr_timer;
     tcp_timer_t *wait_timer;
 
+#ifdef TCP_DEBUG
+    uint32_t init_peer_seq; // First requence number of the peer, in cpu byte order
+#endif
+
     // Send Sequence Space
     //
     //               1         2          3          4      

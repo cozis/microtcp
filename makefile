@@ -28,8 +28,8 @@ HFILES = $(wildcard $(SRCDIR)/*.h)
 OFILES = $(patsubst $(SRCDIR)/%.c, $(OBJDIR)/%.o, $(CFILES))
 
 CFLAGS_WIN = 
-CFLAGS_LIN = -pthread
-CFLAGS = -Wall -Wextra -g $(CFLAGS_$(OSTAG)) -DMICROTCP_DEBUG -DTCP_DEBUG
+CFLAGS_LIN = -pthread -fsanitize=address,undefined
+CFLAGS = -Wall -Wextra -g $(CFLAGS_$(OSTAG)) -DTCP_DEBUG #-DMICROTCP_DEBUG
 
 LIBFILE = $(OUTDIR)/libmicrotcp.a
 
